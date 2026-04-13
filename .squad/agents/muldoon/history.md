@@ -70,3 +70,26 @@
 - **API routes:** `GET /api/logs` accepts `max_verbosity` query param (1-5). `GET /api/logs/stream` SSE endpoint filters by `max_verbosity` before emitting. Default is 5 (show all).
 - **Convention preserved:** DB column is snake_case `verbosity`. API param is snake_case `max_verbosity`. Internal JS uses camelCase `maxVerbosity`.
 - **Build verified:** Clean `tsc --noEmit`.
+
+### 2025-07-17 — Alpha Vantage API Integration
+- **New file:** `server/src/services/alphaVantage.ts` — Alpha Vantage REST API client for OVERVIEW endpoint. Fetches forward P/E, PEG ratio, analyst target price, beta, book value, EV/Revenue, EV/EBITDA, quarterly growth metrics.
+- **Rate limiter:** In-memory tracker with 5 calls/minute and 25 calls/day limits (free tier). Warnings logged at 20+ daily calls. Rate-limited requests return null gracefully.
+- **Caching:** 24-hour TTL via existing `market_data_cache` SQLite table, keys prefixed `av:overview:`. Company fundamentals are slow-changing, so aggressive caching is appropriate.
+- **MarketData interface extended:** 10 new optional fields in `server/src/services/signals/index.ts` for AV data (forwardPE, pegRatio, analystTargetPrice, beta, bookValue, priceToBook, evToRevenue, evToEbitda, quarterlyRevenueGrowthYOY, quarterlyEarningsGrowthYOY).
+- **Scheduler integration:** `server/src/services/scheduler.ts` fetches AV overview per stock in the pipeline, wrapped in try/catch. Merged into MarketData alongside Yahoo/Finnhub/Trends data.
+- **LLM prompt enrichment:** `server/src/services/llm/reasoningEngine.ts` — new "Enhanced Fundamentals (Alpha Vantage)" section in `buildUserPrompt()` when AV fields are available.
+- **Status endpoint:** `server/src/routes/api.ts` — `alpha_vantage` entry added to `/api/status` apis object.
+- **Key design decision:** Alpha Vantage is supplementary only — pipeline continues with Yahoo-only data if AV fails or is rate-limited. API key read from `ALPHA_VANTAGE_MCP_API_KEY` env var.
+- **Logging:** v3 for fetch success/rate-limit warnings, v4 for field-level detail, v5 for raw API responses.
+- **Build verified:** Clean `tsc --noEmit`.
+### 2026-04-16 — Alpha Vantage REST API Integration
+- **New Service:** server/src/services/alphaVantage.ts — OVERVIEW endpoint integration for company fundamentals.
+- **MarketData Extended:** Added 10 new optional fields (forwardPE, pegRatio, targetPrice, beta, bookValue, evToRevenue, evToEbitda, quarterlyGrowthRate, profitMargin, returnOnEquity).
+- **Caching:** 24-hour TTL in market_data_cache table (av:overview: prefix). Keeps free-tier usage within 25 calls/day limit.
+- **Rate Limiter:** In-memory tracker for 5/min and 25/day usage. Logs warnings at 80% daily usage. Resets daily at midnight UTC.
+- **LLM Integration:** reasoningEngine.ts now includes new fields in system prompt for decision context.
+- **API Status:** /api/status endpoint now includes alpha_vantage config (API key availability, call counts).
+- **Graceful Degradation:** All API wrappers return empty/neutral data on failure (never throw).
+- **Files Modified:** signals/index.ts (interface), scheduler.ts (pipeline), reasoningEngine.ts (LLM prompt), routes/api.ts (status).
+- **Team Impact:** Malcolm can optionally use new MarketData fields. Ellie sees alpha_vantage in API status. Wu may want unit tests for rate limiter.
+

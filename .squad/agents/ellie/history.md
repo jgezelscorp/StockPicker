@@ -60,3 +60,19 @@
 - **useApi.ts:** `useActivityLogs` hook accepts and forwards `max_verbosity` to `getLogs()`. Query key includes the param so react-query refetches on change.
 - **useLogStream.ts:** `useLogStream` now accepts optional `maxVerbosity` param, appended to SSE URL as `?max_verbosity=N`. Effect depends on `maxVerbosity` so the EventSource reconnects when verbosity changes.
 - **No new dependencies.** TypeScript compiles clean.
+
+### 2026-04-16 — Discovery Page: Exact Timestamps & Countdown Timer
+- **Last Analysis card:** Replaced relative-only time with locale-formatted exact date/time (e.g., "Apr 13, 2026 9:39 PM") as the primary value, with relative time ("5m ago") as a `card-subtitle` beneath.
+- **Next Scheduled Run card:** Added live countdown timer (`HH:MM:SS`) that ticks every second. Calculates next run client-side as `last_analysis_run + 4 hours`. Shows "Pending" when no last run exists, "Running soon…" when countdown reaches 0. Scheduled time shown as subtitle (e.g., "at 1:39 AM").
+- **Custom `useCountdown` hook:** Uses `useState` + `useEffect` with `setInterval(1000)`. Cleans up interval on unmount/target change. Returns `{ remaining, display }`.
+- **Helpers added:** `formatDateTime()` for locale-aware date formatting, `getNextRunTime()` for client-side next-run calculation, `formatCountdown()` for `HH:MM:SS` string formatting.
+- **Key pattern:** Client-side cron schedule calculation avoids needing a backend change. The 4-hour interval matches the `0 */4 * * *` cron. If the backend adds `next_scheduled_run` later, easy to swap in.
+- **No new dependencies.** TypeScript compiles clean.
+
+### 2026-04-16 — Discovery Pane: Last Analysis Timestamp & Countdown Timer
+- **New UI Elements:** Discovery page now displays exact locale-formatted timestamp for last analysis run and a live countdown timer to the next scheduled run.
+- **Client-side Countdown:** Calculation of next run as lastAnalysisRun + 4h (matches 0 */4 * * * cron). useCountdown hook ticks every second, displays HH:MM:SS.
+- **Self-correcting:** On every status refetch (30s interval), countdown resets from fresh lastAnalysisRun value.
+- **Files:** client/src/pages/Discovery.tsx updated.
+- **Decision captured:** Client-side countdown is hardcoded to 4 hours. Muldoon can later expose next_scheduled_run in API if cron schedule changes.
+

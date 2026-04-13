@@ -578,3 +578,61 @@ Needs API key from user. Integration approach: add as MCP server config + wire i
 - All meaningful changes require team consensus
 - Document architectural decisions here
 - Keep history focused on work, decisions focused on direction
+
+---
+
+# Decision: Client-Side Countdown for Next Scheduled Run
+
+**Author:** Ellie (Frontend Dev)
+**Date:** 2026-04-16
+**Status:** Implemented
+
+## Context
+The Discovery page needed a live countdown to the next analysis run. The backend does not expose a `next_scheduled_run` field.
+
+## Decision
+Calculate the next run time **client-side** as `last_analysis_run + 4 hours` (matching the `0 */4 * * *` cron). A `useCountdown` hook ticks every second and displays `HH:MM:SS`.
+
+## Trade-offs
+- **Pro:** No backend change required; works immediately.
+- **Pro:** Self-corrects on every status refetch (30s interval updates `last_analysis_run`).
+- **Con:** If the cron schedule changes server-side, the frontend hardcodes 4 hours. Muldoon could later add `next_scheduled_run` to the status endpoint to make this dynamic.
+- **Con:** Slight drift possible if the analysis run doesn't start exactly on cron tick.
+
+## Team Impact
+- **Muldoon:** If you add `next_scheduled_run` to `/api/status`, ping me and I'll swap out the client-side calc for the server value.
+- **Malcolm:** No impact on analysis logic.
+
+---
+
+# Decision: Alpha Vantage API Integration
+
+**Author:** Muldoon (Backend Dev)
+**Date:** 2025-07-17
+**Status:** Implemented
+
+## What
+Added Alpha Vantage REST API as a supplementary data source for company fundamentals (OVERVIEW endpoint). Enriches MarketData with forward P/E, PEG ratio, analyst target price, beta, book value, EV multiples, and quarterly growth metrics.
+
+## Key Design Choices
+
+1. **Supplementary, never required** — If AV fails or is rate-limited, the pipeline continues with Yahoo-only data. No code path depends on AV being available.
+
+2. **Aggressive caching (24h)** — Company fundamentals are slow-changing. Cached in existing `market_data_cache` table with `av:overview:` prefix. This keeps free-tier usage well within the 25 calls/day limit.
+
+3. **In-memory rate limiter** — Tracks per-minute (5/min) and daily (25/day) usage. Logs warnings when approaching daily limit. Resets daily count at midnight.
+
+4. **ENV var:** `ALPHA_VANTAGE_MCP_API_KEY` — same key name the user configured in `.env`.
+
+## Files Changed
+- **Created:** `server/src/services/alphaVantage.ts`
+- **Modified:** `server/src/services/signals/index.ts` (MarketData interface)
+- **Modified:** `server/src/services/scheduler.ts` (pipeline data-fetch)
+- **Modified:** `server/src/services/llm/reasoningEngine.ts` (LLM prompt)
+- **Modified:** `server/src/routes/api.ts` (status endpoint)
+
+## Impact on Other Agents
+- **Malcolm (Signals):** MarketData interface now has 10 new optional fields. Signal analyzers can optionally use them but don't need to — all are `?` optional.
+- **Ellie (Frontend):** `/api/status` now includes `alpha_vantage` in the apis object. No UI changes required unless she wants to display it.
+- **Wu (Tests):** New service has no tests yet. May want to add unit tests for the rate limiter and cache behavior.
+
