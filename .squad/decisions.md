@@ -473,6 +473,106 @@ Every signal returns `{ score: 50, confidence: 0.1, direction: 'neutral' }` when
 
 ---
 
+### Verbose Logging Levels (1-5) (2026-04-14)
+
+**Author:** Muldoon (Backend Dev)  
+**Status:** Implemented  
+**Requested by:** Jan G.
+
+#### Decision
+
+Activity logging now supports verbosity levels 1-5:
+
+| Level | Label | What's logged |
+|-------|-------|---------------|
+| 1 | Critical | Errors, executed trades |
+| 2 | Important | Pipeline start/complete, discovery, snapshots, scheduler lifecycle |
+| 3 | Normal | Signal summaries, trade decisions (default) |
+| 4 | Detailed | Per-signal scores, LLM prompt/response summaries, composite breakdowns |
+| 5 | Debug | Full LLM prompts/completions, API call timings, raw market data |
+
+#### API Contract
+
+- `GET /api/logs?max_verbosity=3` — returns logs where verbosity ≤ 3
+- `GET /api/logs/stream?max_verbosity=3` — SSE stream filtered the same way
+- Default `max_verbosity` is 5 (show everything)
+- Each log entry now includes a `verbosity` integer field
+
+#### Impact on Frontend
+
+Ellie: The `/api/logs` and `/api/logs/stream` endpoints now return a `verbosity` field on each log entry. The Activity Log page needs a verbosity selector (1-5 slider or dropdown) that passes `max_verbosity` as a query param to both endpoints. Existing behaviour is unchanged at default (level 5 = show all).
+
+#### DB Migration
+
+Handled automatically — existing `activity_log` rows get `verbosity = 3` (the default). No manual migration needed.
+
+---
+
+### StockDetailModal API Field Mapping (2026-04-16)
+
+**Author:** Ellie (Frontend Dev)  
+**Status:** Applied
+
+#### Context
+StockDetailModal had three bugs where frontend field access didn't match the server response shape.
+
+#### Decisions
+
+1. **Chart timeframe keys are UPPERCASE** — The `Timeframe` type (`'1D' | '1W'` etc.) matches server keys directly. No mapping layer needed. Removed `TIMEFRAME_KEYS`.
+
+2. **Live price data lives in `detail.quote`, not `detail.stock`** — The `stock` object has DB metadata only (symbol, name, market, sector). The `quote` object has live market data (price, change, change_pct, volume, market_cap, pe, exchange, currency, previous_close). All price displays must use `quote.*`.
+
+3. **Indicator series is top-level, 3M only** — Server returns `detail.indicator_series` as a flat object of indicator arrays (not nested per-timeframe). These correspond to the 3M chart data. Indicator overlays should only merge when `timeframe === '3M'`.
+
+4. **Trade confidence field is `confidence`, not `confidence_level`** — Server returns `confidence` on trade objects. Added fallback for both field names.
+
+#### Impact
+All team members writing UI that consumes `/api/stocks/:id/detail` should reference this mapping.
+
+---
+
+### Verbosity Selector UI (2026-04-15)
+
+**Author:** Ellie (Frontend Dev)  
+**Status:** Implemented
+
+#### Decision
+
+Added verbosity selector (1-5 segmented control) to ActivityLog page. Wired `max_verbosity` query parameter to API client and SSE stream hook.
+
+#### Key Choices
+
+1. **Segmented control** — 5 buttons (1–5) for quick verbosity selection, persisted to component state
+2. **API integration** — `useLogStream.ts` hook passes `max_verbosity` to both REST (`GET /api/logs?max_verbosity=...`) and SSE (`/api/logs/stream?max_verbosity=...`) calls
+3. **Default: 3 (Normal)** — Shows typical operational logs; users can increase to 4–5 for debugging or decrease to 1–2 for critical-only view
+
+#### Files Updated
+
+- `ActivityLog.tsx` — added segmented control UI
+- `useLogStream.ts` — threaded `max_verbosity` parameter
+- `client.ts` — API client forwards parameter
+- `useApi.ts` — hook integration
+- `reasoningEngine.ts` — added `max_verbosity` to reasoning log calls
+
+---
+
+### Alpha Vantage MCP Integration (Planned) (2026-04-15)
+
+**Author:** Jan G. (via Coordinator)  
+**Status:** Pending  
+**Decision:** Planned Future Work
+
+#### What
+User suggested adding Alpha Vantage MCP server (https://mcp.alphavantage.co/) to enhance the reasoning engine's stock analysis. This provides real-time/historical stock data, technical indicators, and company fundamentals via MCP protocol.
+
+#### Why
+Would significantly improve signal quality for the stock-picking agent. Free API key available. Can be used as an additional data source alongside Yahoo Finance and Finnhub.
+
+#### Status & Next Steps
+Needs API key from user. Integration approach: add as MCP server config + wire into reasoning engine as an additional signal source.
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus

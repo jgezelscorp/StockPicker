@@ -45,3 +45,18 @@
 - **API layer extended:** `getLogs()` added to client.ts with query param support (limit, offset, category, level, since). `useActivityLogs()` hook in useApi.ts with 10s polling fallback.
 - **Layout + Router:** Nav item "Activity Log" with ▤ icon added after Analysis. Route `/activity` registered in App.tsx.
 - **Conventions maintained:** Inline styles, CSS variables from globals.css, snake_case API fields, no new dependencies. TypeScript compiles clean.
+
+### 2026-04-16 — StockDetailModal Bug Fixes
+- **BUG 1 — Chart data keys:** Server returns chart data with UPPERCASE timeframe keys (`1D`, `1W`, etc.) but `TIMEFRAME_KEYS` was mapping to lowercase (`1d`, `1w`). Removed `TIMEFRAME_KEYS` entirely — the `Timeframe` type already matches server keys. Charts now render on all timeframes.
+- **BUG 2 — Price/change from quote:** Header was reading `stock.current_price` / `stock.price_change` which don't exist on the stock object. Price data lives in `detail.quote`. Extracted `quote` object and wired `quote.price`, `quote.change`, `quote.change_pct` into the header. Added exchange and currency badges.
+- **BUG 3 — Indicator series mapping:** Server returns indicator series at top level (not nested per-timeframe), and only for 3M data. Updated chart data merge to use `indicatorSeries` directly but only when `timeframe === '3M'`.
+- **Stats grid enhanced:** Added Volume, Previous Close from quote; P/E and Market Cap now prefer quote values over fundamentals for live data.
+- **Confidence field:** Trades and analysis sections now read `t.confidence` with fallback to `t.confidence_level` for compatibility.
+- **Key learning:** Always verify API response shape against component field access — the `stock` vs `quote` split is a common pattern where DB metadata and live market data are separate objects.
+
+### 2026-04-16 — Verbosity Level Selector
+- **ActivityLog.tsx:** Added verbosity state (default 3) with a compact 1-5 segmented button control in the filter bar between Level dropdown and spacer. Active button uses accent styling, each button shows tooltip with level name (Critical/Important/Normal/Detailed/Debug). Buttons have connected border-radius (pill-group style).
+- **API client:** `getLogs()` params extended with optional `max_verbosity` — passed as query param to `GET /api/logs`.
+- **useApi.ts:** `useActivityLogs` hook accepts and forwards `max_verbosity` to `getLogs()`. Query key includes the param so react-query refetches on change.
+- **useLogStream.ts:** `useLogStream` now accepts optional `maxVerbosity` param, appended to SSE URL as `?max_verbosity=N`. Effect depends on `maxVerbosity` so the EventSource reconnects when verbosity changes.
+- **No new dependencies.** TypeScript compiles clean.

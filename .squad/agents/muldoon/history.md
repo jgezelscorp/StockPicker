@@ -60,3 +60,13 @@
 - **API endpoints:** `GET /api/logs` (paginated, filterable by category/level/since) and `GET /api/logs/stream` (SSE real-time stream using EventEmitter).
 - **Key pattern:** `logActivity()` calls sit alongside existing `console.log` statements — both fire. Logger also emits to EventEmitter so SSE clients get real-time updates.
 - **Build verified:** Clean `tsc --noEmit` after all changes.
+
+### 2026-04-14 — Verbose Logging Levels (1-5)
+- **Schema change:** Added `verbosity INTEGER NOT NULL DEFAULT 3` column to `activity_log` table (CHECK 1-5). Migration handled in `activityLogger.ts` via PRAGMA table_info check + ALTER TABLE for existing DBs.
+- **activityLogger.ts:** `logActivity()` now takes optional 6th param `verbosity` (1-5, default 3). `getRecentLogs()` accepts `maxVerbosity` filter. SSE `onLog` emitter includes `verbosity` field in entries.
+- **Verbosity levels:** 1=Critical (errors, trades), 2=Important (pipeline lifecycle, discovery, snapshots), 3=Normal (signal summaries, trade decisions), 4=Detailed (per-signal scores, LLM summaries, composite breakdowns), 5=Debug (full API timings, raw LLM prompts/completions, market data assembly).
+- **scheduler.ts:** All existing logActivity calls tagged with appropriate verbosity. Added ~15 new logging points: API call timing (v5), per-signal score detail (v4), composite breakdown (v4), LLM prompt/response summaries (v4), full LLM assessment (v5), market data assembly (v5).
+- **reasoningEngine.ts:** Added v4 logging for prompt summary and response summary. Added v5 logging for full system+user prompts and raw completion text. Also logs fallback-to-rules at v4.
+- **API routes:** `GET /api/logs` accepts `max_verbosity` query param (1-5). `GET /api/logs/stream` SSE endpoint filters by `max_verbosity` before emitting. Default is 5 (show all).
+- **Convention preserved:** DB column is snake_case `verbosity`. API param is snake_case `max_verbosity`. Internal JS uses camelCase `maxVerbosity`.
+- **Build verified:** Clean `tsc --noEmit`.
