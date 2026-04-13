@@ -31,3 +31,17 @@
 - **Layout updated:** Discovery nav item added between Dashboard and Portfolio with 🔍 icon. Route registered in App.tsx.
 - **Resilient to backend shape:** Watchlist and status hooks handle both camelCase and snake_case response fields (e.g., `last_analysis_run` / `lastAnalysisRun`) so the UI works regardless of which backend convention Muldoon ships.
 - **No new dependencies added** — all built with existing React, react-query, react-router stack.
+
+### 2026-04-15 — Stock Detail Modal
+- **StockDetailModal.tsx:** Full-screen overlay modal (~500 lines) with multi-section layout: header (symbol, price, badges, position info), interactive multi-timeframe charts (1D/1W/1M/3M/1Y/3Y), technical indicator toggles (SMA 20/50, EMA 12/26, Bollinger, RSI, MACD as sub-charts), key stats grid (12 metrics from fundamentals + technicals), APEX analysis section with signal breakdown bars, and recent trades with expandable rationale.
+- **Chart architecture:** Used Recharts `syncId` to sync price, volume, RSI, and MACD charts with shared crosshair cursor. Indicator series data merged from API's `indicator_series` field per timeframe. Bollinger bands rendered as paired `<Area>` components, RSI/MACD as conditional sub-charts (~100px each) toggled by chip buttons.
+- **API layer:** Added `getStockDetail(symbolOrId)` to client.ts and `useStockDetail()` hook with 60s staleTime (detail data doesn't need 30s refresh).
+- **Clickable symbols everywhere:** Discovery (both watchlist + recently discovered tables), Portfolio (positions table), Dashboard (recent trades + top signals) — all symbol cells now open the modal. Pattern: `useState<string | null>` + conditional `<StockDetailModal>` render.
+- **Keyboard/mouse UX:** Escape key closes modal, overlay click closes, body scroll locked while open, underline hover on clickable symbols.
+
+### 2026-04-15 — Activity Log Page
+- **ActivityLog.tsx:** Dark terminal-inspired log viewer with SSE live streaming + REST initial fetch, merged and deduplicated by id. Color-coded level badges (info=blue, warn=amber, error=red, reasoning=purple, trade=green, discovery=teal). Expandable JSON details, category/level filters, auto-scroll toggle, pause/resume streaming, clear button.
+- **useLogStream.ts:** Custom SSE hook connecting to `/api/logs/stream`. Keeps last 500 entries in state, auto-reconnects on error. Returns `{ logs, connected, clear }`.
+- **API layer extended:** `getLogs()` added to client.ts with query param support (limit, offset, category, level, since). `useActivityLogs()` hook in useApi.ts with 10s polling fallback.
+- **Layout + Router:** Nav item "Activity Log" with ▤ icon added after Analysis. Route `/activity` registered in App.tsx.
+- **Conventions maintained:** Inline styles, CSS variables from globals.css, snake_case API fields, no new dependencies. TypeScript compiles clean.

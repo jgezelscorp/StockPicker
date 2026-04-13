@@ -32,3 +32,31 @@
 - **API Contracts Locked:** All 12 endpoints finalized for Ellie's frontend. Response shapes validated by Wu's API tests (9 tests, all passing).
 - **Test Validation:** Wu's 82-test suite validates all trading engine contracts (22 tests), confidence thresholds (72% entry, 40% exit), position sizing (15% max, 20 positions, 10% cash), and decision bucketing. 100% pass rate.
 - **Dashboard Ready:** Ellie's 4-page React dashboard (Dashboard, Portfolio, Trades, Analysis) with dark theme, CSS variables, centralized hooks. All hooks consume final API contracts. 30-second auto-refresh working end-to-end.
+
+### 2026-04-13 — API Response snake_case Fix
+- **Problem:** Frontend expected snake_case keys (`total_value`, `cash_balance`, etc.) but API returned camelCase (`totalValue`, `cashBalance`). Caused `undefined.toFixed()` crashes → black screen.
+- **Fixed in `server/src/routes/api.ts`:**
+  - `/api/dashboard` portfolio object: converted all 6 keys to snake_case.
+  - `/api/portfolio`: converted response to snake_case (was passing raw camelCase object).
+  - `/api/status` apis: renamed `yahooFinance` → `yahoo_finance`, `googleTrends` → `google_trends`.
+  - Added missing `/api/portfolio/positions` endpoint (frontend calls it but it didn't exist). Returns positions in snake_case.
+- **Pattern:** Internal services stay camelCase (TS conventions). API boundary layer converts to snake_case for the React frontend. Conversion happens in route handlers, not in service functions.
+- **Portfolio history (`/api/portfolio/history`):** Already correct — raw SQL query returns snake_case column names (`snapshot_at`, `total_value`).
+- **Key files:** `server/src/routes/api.ts` (API boundary), `server/src/services/portfolioTracker.ts` (internal camelCase).
+
+### 2026-04-14 — Stock Detail API Endpoint
+- **New endpoint:** `GET /api/stocks/:symbolOrId/detail` — accepts numeric stock ID or symbol string. Returns comprehensive data for a rich stock detail popup: stock info, quote, extended fundamentals, 6-timeframe chart data, technical indicators (point + series), latest analysis, recent trades, and position.
+- **New file:** `server/src/services/technicalIndicators.ts` — Pure math functions for SMA, EMA, RSI (Wilder smoothing), MACD (12,26,9), Bollinger Bands, ATR. Plus series versions for chart overlays (SMA/EMA/Bollinger/RSI/MACD series).
+- **New in marketData.ts:** `fetchChartData(symbol, interval, range, market?)` — supports custom intervals (5m, 60m, 1wk). Cache TTLs: intraday 2min, daily 60min, weekly 120min. Also `fetchExtendedFundamentals()` — fetches beta, forward PE, price-to-sales, debt-to-equity, ROE, FCF via Yahoo quoteSummary v10.
+- **Chart timeframes:** 1D (5m intervals), 1W (60m intervals), 1M/3M/1Y (daily), 3Y (weekly). All fetched in parallel via Promise.all for performance.
+- **snake_case convention:** All response keys are snake_case. Internal camelCase from Yahoo/services converted at the route boundary.
+- **Graceful degradation:** Fundamentals and quote return null (not error) if Yahoo API fails. Charts return empty arrays. Technical indicators return null if insufficient data.
+- **82 existing tests still passing.** Zero regressions.
+
+### 2026-04-14 — Persistent Activity Logging System
+- **New table:** `activity_log` in `server/src/db/schema.ts` — 6 log levels (`info`, `warn`, `error`, `reasoning`, `trade`, `discovery`), 8 categories (`pipeline`, `signal`, `trade`, `portfolio`, `discovery`, `learning`, `system`, `llm`). Indexed on `created_at`, `category`, `level`. JSON `details` column for structured data.
+- **Logger service:** `server/src/services/activityLogger.ts` — `logActivity()` inserts + emits via EventEmitter for SSE. `getRecentLogs()` with pagination/filtering. `pruneOldLogs()` auto-runs on import (30-day TTL). Also writes to `console.log` so terminal output is preserved.
+- **Scheduler instrumented:** Pipeline start/complete, per-stock signal collection, signal results, LLM reasoning verdict, buy/sell executions, no-trade decisions, errors, discovery runs, learning evaluations, portfolio snapshots — all logged with structured details.
+- **API endpoints:** `GET /api/logs` (paginated, filterable by category/level/since) and `GET /api/logs/stream` (SSE real-time stream using EventEmitter).
+- **Key pattern:** `logActivity()` calls sit alongside existing `console.log` statements — both fire. Logger also emits to EventEmitter so SSE clients get real-time updates.
+- **Build verified:** Clean `tsc --noEmit` after all changes.
