@@ -14,6 +14,12 @@ import {
   fetchHistoricalPrices,
 } from '../services/marketData';
 import { getPortfolioValue, getCashBalance } from '../services/tradingEngine';
+import {
+  runAnalysisPipeline,
+  runStockDiscovery,
+} from '../services/scheduler';
+import { DEFAULT_SCHEDULER_CONFIG } from '../types';
+import { getLLMStatus } from '../services/llm';
 
 const router = Router();
 
@@ -174,7 +180,8 @@ router.get('/watchlist', (_req, res) => {
       SELECT s.*,
         (SELECT COUNT(*) FROM signals WHERE stock_id = s.id) as signal_count,
         (SELECT COUNT(*) FROM trades WHERE stock_id = s.id) as trade_count,
-        (SELECT pp.quantity FROM portfolio_positions pp WHERE pp.stock_id = s.id AND pp.quantity > 0) as held_quantity
+        (SELECT pp.quantity FROM portfolio_positions pp WHERE pp.stock_id = s.id AND pp.quantity > 0) as held_quantity,
+        (SELECT MAX(al.analysed_at) FROM analysis_logs al WHERE al.stock_id = s.id) as last_analysed_at
       FROM stocks s
       WHERE s.is_active = 1
       ORDER BY s.symbol ASC
@@ -351,6 +358,121 @@ router.get('/market/overview', async (req, res) => {
     const region = (req.query.region as string) || 'US';
     const overview = await fetchMarketOverview(region);
     res.json({ success: true, data: overview });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Stock Discovery & Management ──────────────────────────────
+
+router.post('/discover', async (_req, res) => {
+  try {
+    const result = await runStockDiscovery();
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/analyze/run', async (_req, res) => {
+  try {
+    const result = await runAnalysisPipeline(DEFAULT_SCHEDULER_CONFIG);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.delete('/stocks/:id', (req, res) => {
+  try {
+    const db = getDb();
+    const stockId = parseInt(req.params.id);
+    if (isNaN(stockId)) {
+      res.status(400).json({ success: false, error: 'Invalid stock ID' });
+      return;
+    }
+
+    const stock = db.prepare('SELECT * FROM stocks WHERE id = ?').get(stockId) as any;
+    if (!stock) {
+      res.status(404).json({ success: false, error: 'Stock not found' });
+      return;
+    }
+
+    // Check for open positions
+    const position = db.prepare(
+      'SELECT quantity FROM portfolio_positions WHERE stock_id = ? AND quantity > 0'
+    ).get(stockId) as any;
+    if (position) {
+      res.status(400).json({
+        success: false,
+        error: `Cannot remove ${stock.symbol} — currently holding ${position.quantity} shares`,
+      });
+      return;
+    }
+
+    db.prepare('UPDATE stocks SET is_active = 0 WHERE id = ?').run(stockId);
+    res.json({ success: true, message: `${stock.symbol} removed from watchlist` });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/status', (_req, res) => {
+  try {
+    const db = getDb();
+
+    const stockCounts = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active,
+        SUM(CASE WHEN market = 'US' AND is_active = 1 THEN 1 ELSE 0 END) as us,
+        SUM(CASE WHEN market = 'EU' AND is_active = 1 THEN 1 ELSE 0 END) as eu,
+        SUM(CASE WHEN market = 'ASIA' AND is_active = 1 THEN 1 ELSE 0 END) as asia
+      FROM stocks
+    `).get() as any;
+
+    const lastAnalysis = db.prepare(
+      "SELECT value FROM system_state WHERE key = 'last_analysis_run'"
+    ).get() as any;
+
+    const lastDiscovery = db.prepare(
+      "SELECT value FROM system_state WHERE key = 'last_discovery_run'"
+    ).get() as any;
+
+    const apis = {
+      yahooFinance: { configured: true, description: 'No API key needed' },
+      finnhub: {
+        configured: !!process.env.FINNHUB_API_KEY,
+        description: process.env.FINNHUB_API_KEY
+          ? 'API key configured'
+          : 'Not configured — set FINNHUB_API_KEY for real news data',
+      },
+      googleTrends: { configured: true, description: 'No API key needed (uses google-trends-api package)' },
+      llm: {
+        ...getLLMStatus(),
+        description: getLLMStatus().available
+          ? `${getLLMStatus().provider} (${getLLMStatus().model})`
+          : 'Not configured — set OPENAI_API_KEY, AZURE_OPENAI_*, or OLLAMA_BASE_URL for AI reasoning',
+      },
+    };
+
+    res.json({
+      success: true,
+      data: {
+        apis,
+        stocks: {
+          total: stockCounts.total,
+          active: stockCounts.active,
+          byRegion: {
+            US: stockCounts.us,
+            EU: stockCounts.eu,
+            ASIA: stockCounts.asia,
+          },
+        },
+        lastAnalysisRun: lastAnalysis?.value ?? null,
+        lastDiscoveryRun: lastDiscovery?.value ?? null,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

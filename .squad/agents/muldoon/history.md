@@ -17,7 +17,16 @@
 - Discovered existing signal modules (`signals/index.ts`, valuation/trend/sentiment/search) and `learningEngine.ts` written by another agent. Integrated my services to work with those rather than duplicate. My `collectSignals` fallback still exists for raw market-data-only mode.
 - Pre-existing TS error in `api.test.ts` (line 268) — type inference issue on `||` fallback object — not mine, left as-is.
 
-### 2026-04-13 — Cross-Team Integration Complete
+### 2026-04-13 — Real API Integration & Stock Discovery
+- **API Wrappers Created:** Built three new API modules in `server/src/services/apis/`:
+  - `yahooFundamentals.ts`: Yahoo Finance v10 quoteSummary for real P/E, P/B, EPS, market cap, 52-week range, revenue growth, profit margins. 4-hour cache.
+  - `finnhub.ts`: Finnhub company news with keyword-based sentiment scoring (25 positive, 27 negative keywords). 2-hour cache. Graceful degradation if no API key.
+  - `googleTrends.ts`: google-trends-api for search interest, compares 7-day windows. 6-hour cache. Returns neutral on failure (flaky API).
+- **Stock Discovery Service:** `stockDiscovery.ts` with 60+ seed stocks across US (30 stocks + 6 ETFs), Europe (15), and Asia (15). Covers all major sectors. `discoverNewStocks()` uses Yahoo screener for most-active/gainers. `pruneInactiveStocks()` removes 30-day neutral stocks.
+- **Scheduler Updated:** Added weekly discovery cron (Sundays 6AM). Pipeline now fetches fundamentals + news + trends per stock, each in try/catch so one API failure doesn't block others. MarketData enriched with real data for Malcolm's signals.
+- **New API Endpoints:** POST /api/discover, POST /api/analyze/run, DELETE /api/stocks/:id, GET /api/status (API config + stock counts + last run times). Watchlist now includes last_analysed_at.
+- **Startup:** Seeds initial universe on first boot, logs API availability status.
+- **Key Decision:** All API wrappers use graceful degradation — return empty/neutral data on failure, never throw. This keeps the pipeline running even when individual APIs are down or rate-limited.
 - **Signal Integration:** Malcolm's 4-signal model (Valuation 35%, Trend 25%, Sentiment 20%, Search 20%) fully wired into scheduler. Confidence calculation (1 – stddev) working as designed.
 - **Learning Engine Integration:** Malcolm's conservative weight adjustment (±2% max, 5-trade minimum) integrated. Weights read/write to `system_state` JSON.
 - **API Contracts Locked:** All 12 endpoints finalized for Ellie's frontend. Response shapes validated by Wu's API tests (9 tests, all passing).

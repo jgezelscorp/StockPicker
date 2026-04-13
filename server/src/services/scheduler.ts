@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { getDb } from '../db';
 import { DEFAULT_SCHEDULER_CONFIG, DEFAULT_SIGNAL_WEIGHTS, type SchedulerConfig, type PipelineRunResult } from '../types';
-import { fetchStockQuote, fetchHistoricalPrices, refreshPositionPrices, purgeExpiredCache } from './marketData';
+import { fetchStockQuote, fetchHistoricalPrices, fetchFundamentals, refreshPositionPrices, purgeExpiredCache } from './marketData';
 import {
   evaluateSignals,
   shouldBuy,
@@ -13,6 +13,10 @@ import {
 import { takeSnapshot as takePortfolioSnapshotFromTracker } from './portfolioTracker';
 import { analyzeStock, type MarketData } from './signals';
 import { evaluatePastDecisions, adjustWeights, getCurrentWeights } from './learningEngine';
+import { fetchCompanyNews } from './apis/finnhub';
+import { fetchSearchTrend } from './apis/googleTrends';
+import { seedInitialUniverse, discoverNewStocks, pruneInactiveStocks } from './stockDiscovery';
+import { analyzeWithReasoning, buildEnhancedRationale } from './llm';
 
 let activeTasks: cron.ScheduledTask[] = [];
 
@@ -227,7 +231,29 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
         const history = await fetchHistoricalPrices(stock.symbol, '3mo', stock.market);
         const quote = await fetchStockQuote(stock.symbol, stock.market);
 
-        // Build MarketData for the existing signal analysers
+        // 2) Fetch real fundamentals, news, and search trends (each wrapped in try/catch)
+        let fundamentals: Awaited<ReturnType<typeof fetchFundamentals>> | null = null;
+        try {
+          fundamentals = await fetchFundamentals(stock.symbol);
+        } catch (err: any) {
+          console.warn(`[Scheduler] Fundamentals fetch failed for ${stock.symbol}: ${err.message}`);
+        }
+
+        let newsArticles: Awaited<ReturnType<typeof fetchCompanyNews>> = [];
+        try {
+          newsArticles = await fetchCompanyNews(stock.symbol);
+        } catch (err: any) {
+          console.warn(`[Scheduler] News fetch failed for ${stock.symbol}: ${err.message}`);
+        }
+
+        let searchTrend: Awaited<ReturnType<typeof fetchSearchTrend>> | null = null;
+        try {
+          searchTrend = await fetchSearchTrend(stock.symbol, stock.name);
+        } catch (err: any) {
+          console.warn(`[Scheduler] Search trend fetch failed for ${stock.symbol}: ${err.message}`);
+        }
+
+        // Build MarketData for the signal analysers — now with real data
         const closes = history.map(h => h.close);
         const volumes = history.map(h => h.volume);
         const marketData: MarketData = {
@@ -240,6 +266,31 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
           sma200: closes.length >= 200
             ? closes.slice(-200).reduce((s, c) => s + c, 0) / 200
             : undefined,
+          // Real fundamentals from Yahoo Finance quoteSummary
+          peRatio: fundamentals?.peRatio ?? undefined,
+          pbRatio: fundamentals?.pbRatio ?? undefined,
+          dividendYield: fundamentals?.dividendYield ?? undefined,
+          eps: fundamentals?.eps ?? undefined,
+          marketCap: fundamentals?.marketCap ?? undefined,
+          week52High: fundamentals?.week52High ?? undefined,
+          week52Low: fundamentals?.week52Low ?? undefined,
+          revenueGrowth: fundamentals?.revenueGrowth ?? undefined,
+          profitMargin: fundamentals?.profitMargin ?? undefined,
+          // Real news articles for sentiment signal
+          newsArticles: newsArticles.map(a => ({
+            headline: a.headline,
+            source: a.source,
+            sentiment: a.sentiment,
+            publishedAt: a.datetime,
+            summary: a.summary || undefined,
+          })),
+          // Real search trend data
+          searchTrend: searchTrend ? {
+            currentInterest: searchTrend.currentInterest,
+            previousInterest: searchTrend.previousInterest,
+            trend: searchTrend.trend,
+            changePercent: searchTrend.changePercent,
+          } : undefined,
         };
 
         // 2) Run the structured signal pipeline (valuation, trend, sentiment, search)
@@ -254,6 +305,12 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
         const aggregate = await analyzeStock(stock, marketData, weightEntries);
         result.signalsCaptured += aggregate.signals.length;
 
+        // 2b) Run LLM qualitative reasoning (gracefully skipped if no LLM configured)
+        const reasoning = await analyzeWithReasoning(
+          stock.symbol, stock.name || stock.symbol, stock.market,
+          aggregate, marketData,
+        );
+
         // Persist individual signals from the pipeline
         const insertSignal = db.prepare(`
           INSERT INTO signals (stock_id, source, direction, strength, value, metadata)
@@ -266,6 +323,9 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
           );
         }
 
+        // Build enhanced rationale combining quantitative + qualitative analysis
+        const enhancedRationale = buildEnhancedRationale(aggregate.rationale, reasoning);
+
         // Record analysis log
         db.prepare(`
           INSERT INTO analysis_logs
@@ -275,9 +335,12 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
           stock.id,
           aggregate.compositeScore,
           aggregate.overallConfidence,
-          JSON.stringify(aggregate.weightedBreakdown),
+          JSON.stringify({
+            ...Object.fromEntries(aggregate.weightedBreakdown.map(wb => [wb.source, wb])),
+            llm: { verdict: reasoning.llmVerdict, conviction: reasoning.llmConviction, used: reasoning.llmUsed },
+          }),
           aggregate.recommendation,
-          aggregate.rationale
+          enhancedRationale
         );
 
         // 3) Get current price for trading decisions
@@ -295,7 +358,7 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
               weighted: wb.weightedScore / 100,
             }])
           ),
-          rationale: aggregate.rationale,
+          rationale: enhancedRationale,
         };
 
         // 4) Check if we should buy or sell
@@ -308,7 +371,7 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
             quantity: buyDecision.quantity,
             pricePerShare: quote.price,
             confidence: evaluation.confidence,
-            rationale: `${evaluation.rationale} | ${buyDecision.reason}`,
+            rationale: buildEnhancedRationale(`${evaluation.rationale} | ${buyDecision.reason}`, reasoning),
             signalSnapshot: JSON.stringify(aggregate.weightedBreakdown),
           });
           result.tradesExecuted++;
@@ -323,15 +386,16 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
             quantity: sellDecision.quantity,
             pricePerShare: quote.price,
             confidence: evaluation.confidence,
-            rationale: `${evaluation.rationale} | ${sellDecision.reason}`,
+            rationale: buildEnhancedRationale(`${evaluation.rationale} | ${sellDecision.reason}`, reasoning),
             signalSnapshot: JSON.stringify(aggregate.weightedBreakdown),
           });
           result.tradesExecuted++;
         }
 
+        const llmTag = reasoning.llmUsed ? ` [LLM: ${reasoning.llmVerdict}]` : '';
         console.log(
           `[Scheduler] ${stock.symbol}: score=${aggregate.compositeScore.toFixed(3)}, ` +
-          `confidence=${(aggregate.overallConfidence * 100).toFixed(1)}%, rec=${aggregate.recommendation}`
+          `confidence=${(aggregate.overallConfidence * 100).toFixed(1)}%, rec=${aggregate.recommendation}${llmTag}`
         );
       } catch (err: any) {
         result.errors.push(`${stock.symbol}: ${err.message}`);
@@ -409,6 +473,7 @@ export function startScheduler(config: SchedulerConfig = DEFAULT_SCHEDULER_CONFI
   console.log(`  Analysis:  ${config.analysisCron}`);
   console.log(`  Snapshots: ${config.snapshotCron}`);
   console.log(`  Learning:  ${config.learningCron}`);
+  console.log(`  Discovery: weekly (Sundays at 6 AM)`);
 
   // Main analysis pipeline
   const analysisTask = cron.schedule(config.analysisCron, () => {
@@ -428,7 +493,13 @@ export function startScheduler(config: SchedulerConfig = DEFAULT_SCHEDULER_CONFI
     runLearningEvaluation();
   });
 
-  activeTasks = [analysisTask, snapshotTask, learningTask];
+  // Weekly stock discovery — Sundays at 6 AM
+  const discoveryTask = cron.schedule('0 6 * * 0', () => {
+    console.log('[Scheduler] Running stock discovery...');
+    runStockDiscovery().catch(console.error);
+  });
+
+  activeTasks = [analysisTask, snapshotTask, learningTask, discoveryTask];
 
   // Take an initial snapshot on startup
   takePortfolioSnapshot();
@@ -442,3 +513,14 @@ export function stopScheduler(): void {
 
 /** Expose for manual trigger via API */
 export { runAnalysisPipeline, takePortfolioSnapshot, runLearningEvaluation };
+
+/**
+ * Run stock discovery: find new stocks and prune inactive ones.
+ */
+async function runStockDiscovery(): Promise<{ discovered: number; pruned: number }> {
+  const discovered = await discoverNewStocks();
+  const pruned = pruneInactiveStocks();
+  return { discovered, pruned };
+}
+
+export { runStockDiscovery, seedInitialUniverse };

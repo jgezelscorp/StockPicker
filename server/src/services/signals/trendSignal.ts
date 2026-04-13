@@ -27,8 +27,18 @@ function analyzeMovingAverages(marketData: MarketData): MovingAverageAnalysis {
   const sma50 = marketData.sma50 ?? calculateSMA(prices, 50);
   const sma200 = marketData.sma200 ?? calculateSMA(prices, 200);
 
-  if (sma50 === 0 || sma200 === 0) {
+  if (sma50 === 0 && sma200 === 0) {
     return { sma50, sma200, crossoverSignal: 'between', momentumScore: 50 };
+  }
+
+  // Partial data: if only SMA50 available (50–199 days of history), use price vs SMA50
+  if (sma200 === 0 && sma50 > 0 && currentPrice > 0) {
+    const priceVsSma50 = (currentPrice - sma50) / sma50;
+    const momentumScore = Math.max(0, Math.min(100, Math.round(50 + priceVsSma50 * 200)));
+    const crossoverSignal = priceVsSma50 > 0.02 ? 'above_both' as const
+      : priceVsSma50 < -0.02 ? 'below_both' as const
+      : 'between' as const;
+    return { sma50, sma200: 0, crossoverSignal, momentumScore };
   }
 
   let crossoverSignal: MovingAverageAnalysis['crossoverSignal'];

@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 
 const REFRESH_INTERVAL = 30_000;
@@ -83,5 +83,55 @@ export function useHealth() {
     queryKey: ['health'],
     queryFn: api.getHealth,
     refetchInterval: REFRESH_INTERVAL,
+  });
+}
+
+export function useWatchlist() {
+  return useQuery({
+    queryKey: ['watchlist'],
+    queryFn: api.getWatchlist,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useSystemStatus() {
+  return useQuery({
+    queryKey: ['system-status'],
+    queryFn: api.getSystemStatus,
+    refetchInterval: REFRESH_INTERVAL,
+  });
+}
+
+export function useDiscoverStocks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.discoverStocks,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['watchlist'] });
+      qc.invalidateQueries({ queryKey: ['system-status'] });
+    },
+  });
+}
+
+export function useRunAnalysis() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.runAnalysis,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['watchlist'] });
+      qc.invalidateQueries({ queryKey: ['analysis'] });
+      qc.invalidateQueries({ queryKey: ['system-status'] });
+    },
+  });
+}
+
+export function useRemoveStock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.removeStock(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['watchlist'] });
+      qc.invalidateQueries({ queryKey: ['system-status'] });
+    },
   });
 }

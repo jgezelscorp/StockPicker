@@ -22,3 +22,12 @@
 - **Test Validation:** Wu's API tests (9 tests) verify response shapes and error handling. All passing with 100% coverage of dashboard data dependencies.
 - **Auto-Refresh Pipeline:** 30-second refetch interval on all hooks. Portfolio value, trade history, analysis results, and learning outcomes stay synchronized in real-time.
 - **Production Ready:** Dark theme CSS variables in place for all financial states. Layout component tested across all 4 pages. No external charting dependencies beyond Recharts.
+
+### 2026-04-14 — Discovery & Watchlist Page
+- **New Discovery.tsx page:** Full watchlist management with system status cards, sorted table (market→alpha), add/remove stocks, discovery + analysis trigger buttons with loading spinners and toast notifications.
+- **Market color-coding:** US=🇺🇸 blue, EU=🇪🇺 green, ASIA=🌏 orange — consistent badge styling with semi-transparent backgrounds using MARKET_COLOR map.
+- **API layer extended:** 5 new functions in client.ts (getWatchlist, getSystemStatus, discoverStocks, runAnalysis, removeStock). 6 new hooks in useApi.ts including 3 mutations with automatic query invalidation.
+- **Dashboard enhanced:** Added System Status bar showing API health dots, stock count across markets, last analysis time, and link to Discovery page. Uses useSystemStatus() hook with 30s refresh.
+- **Layout updated:** Discovery nav item added between Dashboard and Portfolio with 🔍 icon. Route registered in App.tsx.
+- **Resilient to backend shape:** Watchlist and status hooks handle both camelCase and snake_case response fields (e.g., `last_analysis_run` / `lastAnalysisRun`) so the UI works regardless of which backend convention Muldoon ships.
+- **No new dependencies added** — all built with existing React, react-query, react-router stack.

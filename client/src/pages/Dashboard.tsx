@@ -1,4 +1,5 @@
-import { useDashboard, usePortfolioHistory, useAnalysis } from '../hooks/useApi';
+import { useDashboard, usePortfolioHistory, useAnalysis, useSystemStatus } from '../hooks/useApi';
+import { Link } from 'react-router-dom';
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
@@ -30,6 +31,7 @@ export default function Dashboard() {
   const { data, isLoading, error } = useDashboard();
   const history = usePortfolioHistory(30);
   const signals = useAnalysis();
+  const sysStatus = useSystemStatus();
 
   if (isLoading) return <div className="loading-state">Loading dashboard…</div>;
   if (error) return <div className="error-state">Error: {(error as Error).message}</div>;
@@ -40,6 +42,8 @@ export default function Dashboard() {
   const portfolio = d.portfolio;
   const historyData = history.data?.data ?? [];
   const topSignals = (signals.data?.data ?? []).slice(0, 5);
+  const ss = sysStatus.data?.data ?? sysStatus.data ?? {};
+  const sApis = ss.apis ?? {};
 
   return (
     <div>
@@ -68,6 +72,36 @@ export default function Dashboard() {
           <div className="card-header">Invested</div>
           <div className="card-value">{fmtCompact(portfolio.invested_value)}</div>
           <div className="card-subtitle">{portfolio.position_count} position{portfolio.position_count !== 1 ? 's' : ''}</div>
+        </div>
+      </div>
+
+      {/* ─── System Status Section ─── */}
+      <div className="card" style={{ marginBottom: '1.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div className="card-header" style={{ marginBottom: 0 }}>System Status</div>
+          <Link to="/discovery" style={{ fontSize: '0.8rem', color: 'var(--accent)', textDecoration: 'none' }}>
+            View Details →
+          </Link>
+        </div>
+        <div style={{ display: 'flex', gap: '2rem', alignItems: 'center', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+            {['yahoo_finance', 'finnhub', 'google_trends'].map((key) => {
+              const label = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+              const active = sApis[key] === true || sApis[key] === 'configured';
+              return (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
+                  <span className={`status-dot ${active ? 'status-active' : 'status-error'}`} />
+                  <span style={{ color: active ? 'var(--text-primary)' : 'var(--text-muted)' }}>{label}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+            Tracking <strong style={{ color: 'var(--text-primary)' }}>{ss.totalStocks ?? ss.total_stocks ?? d.pendingAnalyses ?? 0}</strong> stocks across <strong style={{ color: 'var(--text-primary)' }}>3</strong> markets
+          </div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+            Last analysis: {timeAgo(ss.lastAnalysisRun ?? ss.last_analysis_run ?? d.lastRunAt)}
+          </div>
         </div>
       </div>
 

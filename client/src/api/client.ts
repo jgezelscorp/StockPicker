@@ -43,4 +43,14 @@ export const api = {
 
   // Health
   getHealth: () => request<any>('/health'),
+
+  // Watchlist & Discovery
+  getWatchlist: () => request<any>('/watchlist'),
+  getSystemStatus: () => request<any>('/status'),
+  discoverStocks: () =>
+    request<any>('/discover', { method: 'POST' }),
+  runAnalysis: () =>
+    request<any>('/analyze/run', { method: 'POST' }),
+  removeStock: (id: number) =>
+    request<any>(`/stocks/${id}`, { method: 'DELETE' }),
 };

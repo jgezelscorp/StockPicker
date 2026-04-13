@@ -3,6 +3,7 @@ import { useDashboard } from '../hooks/useApi';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: '◫' },
+  { to: '/discovery', label: 'Discovery', icon: '🔍' },
   { to: '/portfolio', label: 'Portfolio', icon: '◉' },
   { to: '/trades', label: 'Trades', icon: '⇄' },
   { to: '/analysis', label: 'Analysis', icon: '◈' },

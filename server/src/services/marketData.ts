@@ -298,6 +298,15 @@ export async function refreshPositionPrices(): Promise<number> {
 }
 
 /**
+ * Fetch fundamental data for a symbol.
+ * Wraps the yahooFundamentals API module.
+ */
+export async function fetchFundamentals(symbol: string): Promise<import('./apis/yahooFundamentals').FundamentalData> {
+  const { fetchFundamentals: fetchFundamentalsApi } = await import('./apis/yahooFundamentals');
+  return fetchFundamentalsApi(symbol);
+}
+
+/**
  * Clean up expired cache entries.
  */
 export function purgeExpiredCache(): void {

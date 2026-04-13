@@ -1,123 +1,58 @@
 import type { Stock } from '../../types';
 import type { SignalResult, MarketData } from './index';
 
-// ─── Search interest data interfaces ──────────────────────────────
-
-interface SearchInterestData {
-  currentInterest: number;     // 0–100 relative interest level
-  previousInterest: number;    // level from comparison period
-  trend: 'rising' | 'falling' | 'stable';
-  changePercent: number;
-  relatedQueries: string[];
-}
-
-// ─── Stubbed data fetch ───────────────────────────────────────────
-
-/**
- * Fetch search interest data for a stock ticker.
- * STUB: Simulates Google Trends-style data without API key.
- *
- * In production, replace with:
- * - Google Trends unofficial API (pytrends proxy)
- * - SerpAPI Google Trends endpoint
- * - Custom scraping service
- */
-async function fetchSearchInterest(symbol: string): Promise<SearchInterestData> {
-  const seed = hashSymbol(symbol);
-
-  // Simulate current vs previous period interest
-  const baseInterest = 20 + (seed % 60);
-  const variance = ((seed * 13) % 40) - 20;
-  const currentInterest = Math.max(5, Math.min(100, baseInterest + variance));
-  const previousInterest = Math.max(5, Math.min(100, baseInterest - variance * 0.3));
-
-  const changePercent = previousInterest > 0
-    ? Math.round(((currentInterest - previousInterest) / previousInterest) * 100)
-    : 0;
-
-  let trend: SearchInterestData['trend'] = 'stable';
-  if (changePercent > 15) trend = 'rising';
-  else if (changePercent < -15) trend = 'falling';
-
-  const relatedQueries = generateRelatedQueries(symbol, seed);
-
-  return {
-    currentInterest,
-    previousInterest,
-    trend,
-    changePercent,
-    relatedQueries,
-  };
-}
-
-/**
- * Generate plausible related search queries for a stock.
- */
-function generateRelatedQueries(symbol: string, seed: number): string[] {
-  const templates = [
-    `${symbol} stock price`,
-    `${symbol} earnings`,
-    `${symbol} buy or sell`,
-    `${symbol} analyst rating`,
-    `${symbol} dividend`,
-    `${symbol} stock forecast`,
-    `${symbol} news today`,
-    `is ${symbol} a good investment`,
-  ];
-
-  const count = 2 + (seed % 4);
-  const selected: string[] = [];
-  for (let i = 0; i < count; i++) {
-    selected.push(templates[(seed + i * 3) % templates.length]);
-  }
-  return selected;
-}
-
-/**
- * Simple hash for deterministic mock data.
- */
-function hashSymbol(symbol: string): number {
-  let hash = 0;
-  for (let i = 0; i < symbol.length; i++) {
-    hash = ((hash << 5) - hash + symbol.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash);
-}
-
 // ─── Scoring logic ────────────────────────────────────────────────
 
 /**
- * Score search interest based on trend direction and magnitude.
+ * Score search interest using real Google Trends data from MarketData.
  *
- * Rising interest in a stock often precedes retail buying pressure.
- * Falling interest may indicate waning enthusiasm.
- *
- * Score: 0–100 (higher = rising public interest = potential bullish signal)
+ * Key principles:
+ * - Rising interest → bullish (retail attention often precedes buying pressure)
+ * - Falling interest → bearish (waning enthusiasm)
+ * - Stable → neutral
+ * - Magnitude matters: +50% is stronger than +10%
+ * - Contrarian: very high absolute interest (>80) + falling = peak attention passed
+ * - Very high absolute interest (>80) alone can be contrarian bearish
  */
-function scoreSearchInterest(data: SearchInterestData): { score: number; confidence: number } {
+function scoreSearchTrend(
+  data: NonNullable<MarketData['searchTrend']>,
+): { score: number; confidence: number } {
+  const { trend, changePercent, currentInterest } = data;
   let score: number;
 
-  if (data.trend === 'rising') {
-    // Rising interest: score based on magnitude of increase
-    const magnitudeBonus = Math.min(30, data.changePercent * 0.5);
+  if (trend === 'rising') {
+    // Rising: base 60, scaled by magnitude of change
+    const magnitudeBonus = Math.min(30, Math.abs(changePercent) * 0.6);
     score = 60 + magnitudeBonus;
 
-    // Very high absolute interest + rising = extra bullish (breakout territory)
-    if (data.currentInterest > 75) score += 5;
-  } else if (data.trend === 'falling') {
-    // Falling interest: score based on magnitude of decrease
-    const magnitudePenalty = Math.min(30, Math.abs(data.changePercent) * 0.5);
+    // Contrarian check: extremely high interest may mean "everyone already knows"
+    if (currentInterest > 80) {
+      score -= 10; // dampen — peak retail attention is often a top signal
+    }
+  } else if (trend === 'falling') {
+    // Falling: base 40, scaled by magnitude
+    const magnitudePenalty = Math.min(30, Math.abs(changePercent) * 0.6);
     score = 40 - magnitudePenalty;
+
+    // Contrarian: extremely high + falling = peak has passed (extra bearish)
+    if (currentInterest > 80) {
+      score -= 5;
+    }
   } else {
-    // Stable: neutral score, slight bonus for high absolute interest
-    score = 45 + Math.min(10, data.currentInterest / 10);
+    // Stable: slight lean based on absolute interest level
+    score = 45 + Math.min(10, currentInterest / 10);
+
+    // Very high stable interest → slight contrarian bearish lean
+    if (currentInterest > 80) {
+      score -= 5;
+    }
   }
 
   score = Math.max(0, Math.min(100, Math.round(score)));
 
-  // Confidence: stronger trends = more confident signal
-  const trendStrength = Math.min(1, Math.abs(data.changePercent) / 50);
-  const baseConfidence = data.trend === 'stable' ? 0.3 : 0.4;
+  // Confidence: stronger trends = more decisive signal
+  const trendStrength = Math.min(1, Math.abs(changePercent) / 50);
+  const baseConfidence = trend === 'stable' ? 0.3 : 0.45;
   const confidence = Math.round(Math.min(1, baseConfidence + trendStrength * 0.4) * 100) / 100;
 
   return { score, confidence };
@@ -126,38 +61,60 @@ function scoreSearchInterest(data: SearchInterestData): { score: number; confide
 // ─── Main export ──────────────────────────────────────────────────
 
 /**
- * Analyse search interest trends for a stock.
- * Score: 0–100 (higher = rising public interest)
+ * Analyse search interest trends using real Google Trends data.
+ * Score: 0–100 (higher = rising public interest = potential bullish)
+ *
+ * Graceful degradation: no searchTrend data → neutral with low confidence.
  */
 export async function analyzeSearchInterest(
   stock: Stock,
   marketData: MarketData,
 ): Promise<SignalResult> {
-  const searchData = await fetchSearchInterest(stock.symbol);
-  const { score, confidence } = scoreSearchInterest(searchData);
+  const searchTrend = marketData.searchTrend;
+
+  // Graceful degradation: no search data
+  if (!searchTrend) {
+    return {
+      source: 'google_trends',
+      score: 50,
+      confidence: 0.1,
+      direction: 'neutral',
+      reasoning: 'No search trend data available — returning neutral.',
+      breakdown: { dataAvailable: false },
+    };
+  }
+
+  const { score, confidence } = scoreSearchTrend(searchTrend);
 
   const direction = score >= 60 ? 'bullish' as const
     : score <= 40 ? 'bearish' as const
     : 'neutral' as const;
 
-  const trendDescription = searchData.trend === 'rising'
-    ? `Search interest rising ${searchData.changePercent}% (${searchData.previousInterest} → ${searchData.currentInterest})`
-    : searchData.trend === 'falling'
-      ? `Search interest falling ${Math.abs(searchData.changePercent)}% (${searchData.previousInterest} → ${searchData.currentInterest})`
-      : `Search interest stable around ${searchData.currentInterest}/100`;
+  const { trend, changePercent, currentInterest, previousInterest } = searchTrend;
+
+  const trendDescription = trend === 'rising'
+    ? `Search interest rising ${changePercent}% (${previousInterest} → ${currentInterest})`
+    : trend === 'falling'
+      ? `Search interest falling ${Math.abs(changePercent)}% (${previousInterest} → ${currentInterest})`
+      : `Search interest stable around ${currentInterest}/100`;
+
+  const contrarianNote = currentInterest > 80
+    ? ' [Contrarian caution: very high absolute interest]'
+    : '';
 
   return {
     source: 'google_trends',
     score,
     confidence,
     direction,
-    reasoning: `${trendDescription}. Top queries: "${searchData.relatedQueries.slice(0, 2).join('", "')}".`,
+    reasoning: `${trendDescription}.${contrarianNote}`,
     breakdown: {
-      currentInterest: searchData.currentInterest,
-      previousInterest: searchData.previousInterest,
-      trend: searchData.trend,
-      changePercent: searchData.changePercent,
-      relatedQueries: searchData.relatedQueries,
+      currentInterest,
+      previousInterest,
+      trend,
+      changePercent,
+      contrarianFlag: currentInterest > 80,
+      dataAvailable: true,
     },
   };
 }

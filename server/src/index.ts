@@ -1,13 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import dotenv from 'dotenv';
+import 'dotenv/config';
 
 import { getDb, closeDb } from './db';
-import { startScheduler, stopScheduler } from './services/scheduler';
+import { startScheduler, stopScheduler, seedInitialUniverse } from './services/scheduler';
 import apiRouter from './routes/api';
-
-dotenv.config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -37,6 +35,15 @@ const server = app.listen(PORT, () => {
 
   // Initialise DB (creates tables if needed)
   getDb();
+
+  // Seed the stock universe on first startup
+  seedInitialUniverse();
+
+  // Log which APIs are available
+  console.log('[APEX] API status:');
+  console.log('  Yahoo Finance: ✅ (no key needed)');
+  console.log('  Google Trends:  ✅ (no key needed)');
+  console.log(`  Finnhub News:   ${process.env.FINNHUB_API_KEY ? '✅ configured' : '⚠️  FINNHUB_API_KEY not set — news data unavailable'}`);
 
   // Start the autonomous scheduler
   startScheduler();

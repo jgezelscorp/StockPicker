@@ -12,10 +12,31 @@ export interface MarketData {
   peRatio?: number;
   pbRatio?: number;
   dividendYield?: number;
+  eps?: number;
+  marketCap?: number;
+  week52High?: number;
+  week52Low?: number;
+  revenueGrowth?: number;
+  profitMargin?: number;
   sma50?: number;
   sma200?: number;
   priceHistory?: number[];     // daily closing prices, oldest first
   volumeHistory?: number[];    // daily volumes, oldest first
+  /** Real news articles from Finnhub with pre-computed sentiment */
+  newsArticles?: {
+    headline: string;
+    source: string;
+    sentiment: number;  // -1 to +1
+    publishedAt: string;
+    summary?: string;
+  }[];
+  /** Real search trend data from Google Trends */
+  searchTrend?: {
+    currentInterest: number;
+    previousInterest: number;
+    trend: 'rising' | 'falling' | 'stable';
+    changePercent: number;
+  };
 }
 
 /** Result from a single signal analyser */
