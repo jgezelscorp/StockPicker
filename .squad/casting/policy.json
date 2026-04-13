@@ -1,0 +1,5 @@
+{
+  "universes": ["jurassic-park"],
+  "max_capacity": 10,
+  "overflow_strategy": "diegetic-expansion"
+}

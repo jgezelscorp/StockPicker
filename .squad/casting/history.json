@@ -1,0 +1,11 @@
+{
+  "assignments": [
+    {
+      "assignment_id": "apex-001",
+      "universe": "jurassic-park",
+      "created_at": "2026-04-13T17:47:00Z",
+      "agents": ["Grant", "Ellie", "Muldoon", "Malcolm", "Wu"],
+      "reason": "Initial team casting for APEX project"
+    }
+  ]
+}
