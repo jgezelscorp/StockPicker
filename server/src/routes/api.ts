@@ -1,0 +1,359 @@
+import { Router } from 'express';
+import { getDb } from '../db';
+import {
+  getPortfolio,
+  getPortfolioHistory,
+  getTradeHistory,
+  takeSnapshot,
+  getPerformanceMetrics,
+  getDecisionQualityAnalysis,
+} from '../services/portfolioTracker';
+import {
+  fetchStockQuote,
+  fetchMarketOverview,
+  fetchHistoricalPrices,
+} from '../services/marketData';
+import { getPortfolioValue, getCashBalance } from '../services/tradingEngine';
+
+const router = Router();
+
+// ─── Portfolio ──────────────────────────────────────────────────
+
+router.get('/portfolio', (_req, res) => {
+  try {
+    const portfolio = getPortfolio();
+    res.json({ success: true, data: portfolio });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/portfolio/history', (req, res) => {
+  try {
+    const days = parseInt(req.query.days as string) || 90;
+    const history = getPortfolioHistory(days);
+    res.json({ success: true, data: history });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Trades ─────────────────────────────────────────────────────
+
+router.get('/trades', (req, res) => {
+  try {
+    const filters = {
+      symbol: req.query.symbol as string | undefined,
+      action: req.query.action as 'buy' | 'sell' | undefined,
+      fromDate: req.query.from as string | undefined,
+      toDate: req.query.to as string | undefined,
+      page: parseInt(req.query.page as string) || 1,
+      pageSize: parseInt(req.query.pageSize as string) || 20,
+    };
+    const result = getTradeHistory(filters);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/trades/:id', (req, res) => {
+  try {
+    const db = getDb();
+    const trade = db.prepare(`
+      SELECT t.*, s.symbol, s.name as stock_name, s.market, s.sector
+      FROM trades t
+      JOIN stocks s ON s.id = t.stock_id
+      WHERE t.id = ?
+    `).get(parseInt(req.params.id)) as any;
+
+    if (!trade) {
+      res.status(404).json({ success: false, error: 'Trade not found' });
+      return;
+    }
+
+    // Also fetch the analysis log closest to this trade's execution
+    const analysis = db.prepare(`
+      SELECT * FROM analysis_logs
+      WHERE stock_id = ? AND analysed_at <= ?
+      ORDER BY analysed_at DESC LIMIT 1
+    `).get(trade.stock_id, trade.executed_at);
+
+    // Fetch learning outcome if evaluated
+    const outcome = db.prepare(
+      'SELECT * FROM learning_outcomes WHERE trade_id = ?'
+    ).get(trade.id);
+
+    res.json({
+      success: true,
+      data: {
+        ...trade,
+        analysis: analysis || null,
+        learningOutcome: outcome || null,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Signals ────────────────────────────────────────────────────
+
+router.get('/signals/:symbol', (req, res) => {
+  try {
+    const db = getDb();
+    const symbol = req.params.symbol.toUpperCase();
+
+    const stock = db.prepare(
+      'SELECT id FROM stocks WHERE symbol = ?'
+    ).get(symbol) as any;
+
+    if (!stock) {
+      res.status(404).json({ success: false, error: `Stock ${symbol} not found` });
+      return;
+    }
+
+    // Get the most recent signals for each source
+    const signals = db.prepare(`
+      SELECT s1.* FROM signals s1
+      INNER JOIN (
+        SELECT source, MAX(captured_at) as max_time
+        FROM signals WHERE stock_id = ?
+        GROUP BY source
+      ) s2 ON s1.source = s2.source AND s1.captured_at = s2.max_time
+      WHERE s1.stock_id = ?
+      ORDER BY s1.source
+    `).all(stock.id, stock.id);
+
+    // Get latest analysis
+    const latestAnalysis = db.prepare(`
+      SELECT * FROM analysis_logs
+      WHERE stock_id = ?
+      ORDER BY analysed_at DESC LIMIT 1
+    `).get(stock.id);
+
+    res.json({
+      success: true,
+      data: {
+        symbol,
+        signals,
+        latestAnalysis: latestAnalysis || null,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Analysis & Performance ─────────────────────────────────────
+
+router.get('/analysis/performance', (_req, res) => {
+  try {
+    const metrics = getPerformanceMetrics();
+    res.json({ success: true, data: metrics });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/analysis/decisions', (_req, res) => {
+  try {
+    const analysis = getDecisionQualityAnalysis();
+    res.json({ success: true, data: analysis });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Watchlist ──────────────────────────────────────────────────
+
+router.get('/watchlist', (_req, res) => {
+  try {
+    const db = getDb();
+    const stocks = db.prepare(`
+      SELECT s.*,
+        (SELECT COUNT(*) FROM signals WHERE stock_id = s.id) as signal_count,
+        (SELECT COUNT(*) FROM trades WHERE stock_id = s.id) as trade_count,
+        (SELECT pp.quantity FROM portfolio_positions pp WHERE pp.stock_id = s.id AND pp.quantity > 0) as held_quantity
+      FROM stocks s
+      WHERE s.is_active = 1
+      ORDER BY s.symbol ASC
+    `).all();
+    res.json({ success: true, data: stocks });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/watchlist', (req, res) => {
+  try {
+    const db = getDb();
+    const { symbol, name, market, assetType, sector, currency } = req.body;
+
+    if (!symbol || !name || !market) {
+      res.status(400).json({
+        success: false,
+        error: 'symbol, name, and market are required',
+      });
+      return;
+    }
+
+    const validMarkets = ['US', 'EU', 'ASIA'];
+    if (!validMarkets.includes(market)) {
+      res.status(400).json({
+        success: false,
+        error: `market must be one of: ${validMarkets.join(', ')}`,
+      });
+      return;
+    }
+
+    // Check for duplicate
+    const existing = db.prepare(
+      'SELECT id, is_active FROM stocks WHERE symbol = ?'
+    ).get(symbol.toUpperCase()) as any;
+
+    if (existing) {
+      if (!existing.is_active) {
+        // Re-activate
+        db.prepare('UPDATE stocks SET is_active = 1 WHERE id = ?').run(existing.id);
+        const stock = db.prepare('SELECT * FROM stocks WHERE id = ?').get(existing.id);
+        res.json({ success: true, data: stock, message: 'Stock reactivated' });
+        return;
+      }
+      res.status(409).json({ success: false, error: `${symbol} is already on the watchlist` });
+      return;
+    }
+
+    const result = db.prepare(`
+      INSERT INTO stocks (symbol, name, market, asset_type, sector, currency)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      symbol.toUpperCase(), name, market,
+      assetType || 'stock', sector || null, currency || 'USD'
+    );
+
+    const stock = db.prepare('SELECT * FROM stocks WHERE id = ?').get(result.lastInsertRowid);
+    res.status(201).json({ success: true, data: stock });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.delete('/watchlist/:symbol', (req, res) => {
+  try {
+    const db = getDb();
+    const symbol = req.params.symbol.toUpperCase();
+
+    const stock = db.prepare('SELECT id FROM stocks WHERE symbol = ?').get(symbol) as any;
+    if (!stock) {
+      res.status(404).json({ success: false, error: `Stock ${symbol} not found` });
+      return;
+    }
+
+    // Check for open position — can't remove if holding shares
+    const position = db.prepare(
+      'SELECT quantity FROM portfolio_positions WHERE stock_id = ? AND quantity > 0'
+    ).get(stock.id) as any;
+    if (position) {
+      res.status(400).json({
+        success: false,
+        error: `Cannot remove ${symbol} — currently holding ${position.quantity} shares`,
+      });
+      return;
+    }
+
+    // Soft delete — just deactivate
+    db.prepare('UPDATE stocks SET is_active = 0 WHERE id = ?').run(stock.id);
+    res.json({ success: true, message: `${symbol} removed from watchlist` });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Dashboard ──────────────────────────────────────────────────
+
+router.get('/dashboard', (_req, res) => {
+  try {
+    const db = getDb();
+    const portfolio = getPortfolio();
+
+    const recentTrades = db.prepare(`
+      SELECT t.*, s.symbol, s.name as stock_name
+      FROM trades t JOIN stocks s ON s.id = t.stock_id
+      ORDER BY t.executed_at DESC LIMIT 10
+    `).all();
+
+    // Top signals: most recent analysis results
+    const topSignals = db.prepare(`
+      SELECT a.*, s.symbol, s.name as stock_name
+      FROM analysis_logs a
+      JOIN stocks s ON s.id = a.stock_id
+      ORDER BY a.analysed_at DESC LIMIT 10
+    `).all();
+
+    const lastRun = db.prepare(
+      "SELECT value FROM system_state WHERE key = 'last_analysis_run'"
+    ).get() as any;
+
+    const watchlistCount = (db.prepare(
+      'SELECT COUNT(*) as cnt FROM stocks WHERE is_active = 1'
+    ).get() as any).cnt;
+
+    res.json({
+      success: true,
+      data: {
+        portfolio: {
+          totalValue: portfolio.totalValue,
+          cashBalance: portfolio.cashBalance,
+          investedValue: portfolio.investedValue,
+          totalPnl: portfolio.totalPnl,
+          totalPnlPct: portfolio.totalPnlPct,
+          positionCount: portfolio.positionCount,
+        },
+        recentTrades,
+        topSignals,
+        watchlistCount,
+        lastRunAt: lastRun?.value ?? null,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Market Data (proxy for client) ────────────────────────────
+
+router.get('/market/quote/:symbol', async (req, res) => {
+  try {
+    const quote = await fetchStockQuote(req.params.symbol.toUpperCase());
+    if (!quote) {
+      res.status(404).json({ success: false, error: 'Quote not available' });
+      return;
+    }
+    res.json({ success: true, data: quote });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/market/history/:symbol', async (req, res) => {
+  try {
+    const period = (req.query.period as string) || '3mo';
+    const prices = await fetchHistoricalPrices(req.params.symbol.toUpperCase(), period);
+    res.json({ success: true, data: prices });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/market/overview', async (req, res) => {
+  try {
+    const region = (req.query.region as string) || 'US';
+    const overview = await fetchMarketOverview(region);
+    res.json({ success: true, data: overview });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+export default router;

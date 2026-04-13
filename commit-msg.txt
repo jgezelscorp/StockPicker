@@ -1,0 +1,56 @@
+feat: Complete APEX initial build - trading engine, signals, dashboard, tests
+
+## Summary
+
+Successful parallel build of APEX (Autonomous Portfolio Expert System) Phase 1.
+
+## Components Delivered
+
+- **Backend (Muldoon):** Trading engine with confidence-based entry/exit, market data service 
+  (Yahoo Finance v8), portfolio tracker with Sharpe ratio, 12 REST API endpoints
+- **Data Pipeline (Malcolm):** 4-signal model (Valuation 35%, Trend 25%, Sentiment 20%, 
+  Search 20%), weighted aggregation, conservative learning engine (±2% max per cycle, 
+  5-trade minimum)
+- **Frontend (Ellie):** 4-page React dashboard (Dashboard, Portfolio, Trades, Analysis), 
+  dark financial theme, centralized API hooks with 30-second auto-refresh
+- **Testing (Wu):** 82 tests across 5 suites (trading engine, signals, portfolio, learning, 
+  API) - all passing with 100% success rate
+
+## Key Decisions Merged
+
+- Signal confidence = 1 – stddev(directional signals) penalizes conflicting signals naturally
+- REST API on separate router (routes/api.ts) for clean architecture
+- CSS custom properties (globals.css) for dark theme without bundle bloat
+- Schema-driven tests with in-memory SQLite validate contracts before implementation
+
+## Cross-Team Synchronization
+
+✅ Backend API contracts locked for frontend integration
+✅ Signal interface standardized (0–100 → -1..+1 mapping)
+✅ DTO types extended for dashboard consumption
+✅ All architectural constraints validated by test suite
+✅ No blocking inter-team dependencies
+
+## Orchestration Logs
+
+- .squad/orchestration-log/2026-04-13T1750-muldoon.md (649s, 49 tool calls)
+- .squad/orchestration-log/2026-04-13T1750-malcolm.md (477s, 33 tool calls)
+- .squad/orchestration-log/2026-04-13T1750-ellie.md (412s, 31 tool calls)
+- .squad/orchestration-log/2026-04-13T1750-wu.md (507s, 35 tool calls)
+
+## Decision Tracking
+
+Merged inbox decisions into .squad/decisions.md:
+- Backend Service Architecture (Muldoon)
+- Signal Pipeline Architecture (Malcolm)
+- Frontend Dashboard Architecture (Ellie)
+- Test Strategy - Schema-Driven with In-Memory SQLite (Wu)
+
+## Next Phase (Deferred)
+
+- Real API integrations (Alpha Vantage fallback, Google Trends, News APIs)
+- WebSocket support for real-time dashboard updates
+- Azure deployment and production hardening
+- Macro trend signal implementation
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>

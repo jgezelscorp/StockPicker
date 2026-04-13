@@ -98,6 +98,110 @@ Initial version uses fixed weights with passive tracking. Phase 2 enhances with 
 
 ---
 
+## Implementation Phase 1 Decisions
+
+### Backend Service Architecture (2026-04-13)
+
+**Author:** Muldoon (Backend Dev)  
+**Status:** Implemented  
+**Related:** APEX System Architecture Decision 3 & 4
+
+#### Key Decisions
+
+1. **Market Data via Yahoo Finance v8** — No API key required, covers US/EU/ASIA via index symbols. Quotes cached 5min, historical 60min in SQLite. Rate-limited to 200ms between requests. Falls back gracefully on 429s.
+
+2. **Trading Engine uses signal agreement as confidence** — Confidence = 1 – stddev of directional signal values. This naturally penalises conflicting signals. Composite score is the weighted average of directional values (–1 to +1).
+
+3. **Integrated with existing signal modules** — The scheduler feeds market data into the existing `analyzeStock()` pipeline rather than duplicating signal logic. Learning engine weight adjustments flow back into the next analysis run.
+
+4. **REST API on separate router** — Moved all endpoints out of `index.ts` into `routes/api.ts`, mounted at `/api`. Cleaner separation. Old inline routes in index.ts removed.
+
+5. **Position sizing scales with conviction** — `strong_buy` gets full 15% allocation, regular `buy` gets 70% of max. 10% cash reserve always maintained.
+
+#### Consequences
+
+- Yahoo Finance unofficial API may change without notice — should add Alpha Vantage as fallback
+- Signal proxies for social/news/google are derived from price action until real APIs are integrated
+- No WebSocket support yet — dashboard polls on interval
+
+---
+
+### Signal Pipeline Architecture (2026-04-13)
+
+**Author:** Malcolm (Data Engineer)  
+**Status:** Implemented  
+**Related:** APEX System Architecture Decision 5
+
+#### Key Decisions
+
+1. Implemented the task spec's 4-signal model (vs Grant's ADR 6-source model):
+   - **Valuation** (35%) — consolidated P/E, P/B, and dividend yield into one signal
+   - **Trend** (25%) — MA crossovers + volume analysis
+   - **Sentiment** (20%) — aggregates news + social into one pipeline
+   - **Search Interest** (20%) — Google Trends proxy
+
+2. **Signal-to-DB Mapping** — Each signal produces 0–100 score internally, mapped to -1..+1 for `analysis_logs.composite_score` column and to SignalDirection for `signals` table.
+
+3. **Learning Engine Conservative Tuning** — Max ±2% per cycle, minimum 5 evaluated trades before adjustment, weights bounded 5%–50% per signal. Weights stored in `system_state` table as JSON under `signal_weights` key.
+
+#### Consequences
+
+- Macro trend signal is deferred — no data source yet
+- News and social sentiment are aggregated as one signal (weighted 55/45 internally)
+- Mock data is deterministic per symbol, ready for real API plug-in
+- Learning engine is functional but needs real trade data to start adjusting
+
+---
+
+### Frontend Dashboard Architecture (2026-04-13)
+
+**Author:** Ellie (Frontend Dev)  
+**Status:** Implemented  
+**Related:** APEX System Architecture Decision 1 & 4
+
+#### Key Decisions
+
+1. **CSS Variables over CSS-in-JS** — Using global `globals.css` with CSS custom properties for dark financial theme. Avoids styled-components/emotion dependency, keeps bundle lean, consistent `var(--profit)` / `var(--loss)` tokens.
+
+2. **Layout via `<Outlet />`** — Layout.tsx component uses React Router's `<Outlet />` for nested routing. Sidebar and header stay mounted across page transitions. Header shows live portfolio value from dashboard API hook.
+
+3. **Centralized API Hooks** — All data fetching lives in `hooks/useApi.ts`. Every hook wraps @tanstack/react-query with 30-second auto-refresh interval. Components never call `api.*` directly.
+
+4. **Client-side Filtering (Trades)** — Trade filters (symbol, action, date range) run client-side on fetched page. Acceptable for 50-row page size. When Muldoon adds server-side params, hooks can forward them with zero component changes.
+
+5. **Derived Analytics Charts** — Signal accuracy and decision-quality-over-time computed from `learning_outcomes` data using `useMemo`. No additional API endpoints needed.
+
+#### Consequences
+
+- New financial colors should be added as CSS variables in `globals.css`
+- Pages depend on API response shape from Grant's architecture doc. If Muldoon changes formats, `useApi.ts` hooks are the single place to update.
+- Recharts is the only charting dependency.
+
+---
+
+### Test Strategy — Schema-Driven with In-Memory SQLite (2026-04-13)
+
+**Author:** Wu (Tester)  
+**Status:** Implemented  
+**Related:** APEX System Architecture Decisions 2 & 6
+
+#### Key Decisions
+
+1. **Tests written against DB schema and shared types** rather than importing service modules. Each test creates fresh in-memory SQLite DB via `new Database(':memory:')` + `initializeSchema()`. 
+
+2. **Pure-logic helpers mirror service expectations** — Signal scoring, weight adjustment, trade execution tested as contracts. Tests validate the *contracts* and will catch regressions once real services are wired in.
+
+3. **Schema first, implementation agnostic** — If schema changes, tests break immediately (good early warning). When services land, can add integration tests importing real modules.
+
+#### Consequences
+
+- Tests run in ~1 second with zero external dependencies
+- No mocking of HTTP or service layers needed for core logic
+- 82 tests across 5 suites, 100% passing
+- All architectural constraints validated (confidence gating, position sizing, signal bounds)
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus
