@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: path.resolve(__dirname, '..', '..', '.env') });
 
 import { getDb, closeDb } from './db';
 import { startScheduler, stopScheduler, seedInitialUniverse } from './services/scheduler';

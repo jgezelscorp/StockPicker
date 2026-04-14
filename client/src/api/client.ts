@@ -53,4 +53,30 @@ export const api = {
     request<any>('/analyze/run', { method: 'POST' }),
   removeStock: (id: number) =>
     request<any>(`/stocks/${id}`, { method: 'DELETE' }),
+
+  // Stock Detail
+  getStockDetail: (symbolOrId: string | number) =>
+    request<any>(`/stocks/${symbolOrId}/detail`),
+
+  // Cash Adjustment
+  adjustCash: (amount: number, reason?: string) =>
+    request<any>('/portfolio/adjust-cash', {
+      method: 'POST',
+      body: JSON.stringify({ amount, reason }),
+    }),
+
+  // Analysis Runs
+  getAnalysisRuns: () => request<any>('/analysis-runs'),
+
+  // Activity Log
+  getLogs: (params?: { limit?: number; offset?: number; category?: string; level?: string; since?: string; max_verbosity?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.offset) qs.set('offset', String(params.offset));
+    if (params?.category) qs.set('category', params.category);
+    if (params?.level) qs.set('level', params.level);
+    if (params?.since) qs.set('since', params.since);
+    if (params?.max_verbosity) qs.set('max_verbosity', String(params.max_verbosity));
+    return request<any>(`/logs?${qs.toString()}`);
+  },
 };

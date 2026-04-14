@@ -3,7 +3,7 @@
  * Configured via environment variables. Returns null when no provider is set,
  * allowing graceful fallback to rule-based reasoning.
  */
-import OpenAI from 'openai';
+import OpenAI, { AzureOpenAI } from 'openai';
 
 export interface LLMConfig {
   provider: 'openai' | 'azure-openai' | 'ollama' | 'none';
@@ -18,7 +18,7 @@ export interface LLMResponse {
   tokensUsed: number;
 }
 
-let client: OpenAI | null = null;
+let client: OpenAI | AzureOpenAI | null = null;
 let config: LLMConfig | null = null;
 
 /**
@@ -56,18 +56,21 @@ export function getLLMConfig(): LLMConfig {
   return config;
 }
 
-function getClient(): OpenAI | null {
+function getClient(): OpenAI | AzureOpenAI | null {
   if (client) return client;
   const cfg = getLLMConfig();
 
   if (cfg.provider === 'openai') {
     client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   } else if (cfg.provider === 'azure-openai') {
-    client = new OpenAI({
+    // Normalize endpoint: strip any trailing /openai/v1/ or /openai/ that users may include
+    const rawEndpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
+    const endpoint = rawEndpoint.replace(/\/openai(\/v1)?\/?$/, '').replace(/\/$/, '');
+    client = new AzureOpenAI({
       apiKey: process.env.AZURE_OPENAI_API_KEY,
-      baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${cfg.model}`,
-      defaultQuery: { 'api-version': process.env.AZURE_OPENAI_API_VERSION || '2024-06-01' },
-      defaultHeaders: { 'api-key': process.env.AZURE_OPENAI_API_KEY! },
+      endpoint,
+      deployment: cfg.model,
+      apiVersion: process.env.AZURE_OPENAI_API_VERSION || '2024-06-01',
     });
   } else if (cfg.provider === 'ollama') {
     client = new OpenAI({
@@ -93,13 +96,18 @@ export async function chatCompletion(
   if (!openai) return null;
 
   try {
+    // Newer models (gpt-5.x etc.) require max_completion_tokens instead of max_tokens
+    const isNewerModel = /gpt-5|o[1-9]/.test(cfg.model);
+    const tokenParam = isNewerModel
+      ? { max_completion_tokens: cfg.maxTokens }
+      : { max_tokens: cfg.maxTokens };
     const response = await openai.chat.completions.create({
       model: cfg.model,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      max_tokens: cfg.maxTokens,
+      ...tokenParam,
       temperature: cfg.temperature,
     });
 

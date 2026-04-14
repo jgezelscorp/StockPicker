@@ -37,6 +37,17 @@ export interface MarketData {
     trend: 'rising' | 'falling' | 'stable';
     changePercent: number;
   };
+  // Alpha Vantage enrichment
+  forwardPE?: number;
+  pegRatio?: number;
+  analystTargetPrice?: number;
+  beta?: number;
+  bookValue?: number;
+  priceToBook?: number;
+  evToRevenue?: number;
+  evToEbitda?: number;
+  quarterlyRevenueGrowthYOY?: number;
+  quarterlyEarningsGrowthYOY?: number;
 }
 
 /** Result from a single signal analyser */

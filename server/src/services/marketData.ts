@@ -36,6 +36,8 @@ export interface MarketOverview {
 
 const QUOTE_CACHE_MINUTES = 5;
 const HISTORICAL_CACHE_MINUTES = 60;
+const INTRADAY_CACHE_MINUTES = 2;
+const WEEKLY_CACHE_MINUTES = 120;
 
 function ensureCacheTable(): void {
   const db = getDb();
@@ -91,6 +93,47 @@ async function throttle(): Promise<void> {
   }
   lastRequestTime = Date.now();
 }
+
+// ─── Yahoo crumb/cookie auth (required for v10 quoteSummary) ────
+
+let yahooCrumb: string | null = null;
+let yahooCookie: string | null = null;
+let crumbExpiresAt = 0;
+const CRUMB_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+async function ensureYahooCrumb(): Promise<{ crumb: string; cookie: string }> {
+  if (yahooCrumb && yahooCookie && Date.now() < crumbExpiresAt) {
+    return { crumb: yahooCrumb, cookie: yahooCookie };
+  }
+
+  // Step 1: Get cookies from Yahoo
+  const cookieResp = await axios.get('https://fc.yahoo.com', {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    timeout: 5000,
+    validateStatus: () => true,
+  });
+  const setCookies = cookieResp.headers['set-cookie'];
+  const cookieStr = setCookies?.map((c: string) => c.split(';')[0]).join('; ') || '';
+
+  if (!cookieStr) throw new Error('Failed to obtain Yahoo cookies');
+
+  // Step 2: Get crumb using cookies
+  const crumbResp = await axios.get('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Cookie: cookieStr },
+    timeout: 5000,
+  });
+  const crumb = crumbResp.data;
+
+  if (!crumb || typeof crumb !== 'string') throw new Error('Failed to obtain Yahoo crumb');
+
+  yahooCrumb = crumb;
+  yahooCookie = cookieStr;
+  crumbExpiresAt = Date.now() + CRUMB_TTL_MS;
+
+  return { crumb, cookie: cookieStr };
+}
+
+export { ensureYahooCrumb };
 
 // Map market suffixes for non-US symbols
 function yahooSymbol(symbol: string, market?: string): string {
@@ -304,6 +347,165 @@ export async function refreshPositionPrices(): Promise<number> {
 export async function fetchFundamentals(symbol: string): Promise<import('./apis/yahooFundamentals').FundamentalData> {
   const { fetchFundamentals: fetchFundamentalsApi } = await import('./apis/yahooFundamentals');
   return fetchFundamentalsApi(symbol);
+}
+
+// ─── Extended fundamentals (includes beta, forward PE, etc.) ────
+
+export interface ExtendedFundamentals {
+  pe_ratio: number | null;
+  pb_ratio: number | null;
+  dividend_yield: number | null;
+  eps: number | null;
+  market_cap: number | null;
+  week_52_high: number | null;
+  week_52_low: number | null;
+  revenue_growth: number | null;
+  profit_margin: number | null;
+  beta: number | null;
+  forward_pe: number | null;
+  price_to_sales: number | null;
+  debt_to_equity: number | null;
+  return_on_equity: number | null;
+  free_cash_flow: number | null;
+  peg_ratio: number | null;
+  analyst_target_price: number | null;
+  book_value: number | null;
+  ev_to_revenue: number | null;
+  ev_to_ebitda: number | null;
+  earnings_quarterly_growth: number | null;
+  operating_margin: number | null;
+}
+
+function extractNum(obj: any, key: string): number | null {
+  if (!obj) return null;
+  const val = obj[key];
+  if (val == null) return null;
+  if (typeof val === 'object' && val.raw != null) return val.raw;
+  if (typeof val === 'number' && isFinite(val)) return val;
+  return null;
+}
+
+export async function fetchExtendedFundamentals(symbol: string): Promise<ExtendedFundamentals | null> {
+  ensureCacheTable();
+  const cacheKey = `ext-fundamentals:${symbol}`;
+  const cached = getCached<ExtendedFundamentals>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    await throttle();
+    const { crumb, cookie } = await ensureYahooCrumb();
+    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}`;
+    const resp = await axios.get(url, {
+      params: { modules: 'defaultKeyStatistics,financialData,summaryDetail', crumb },
+      timeout: 15_000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Cookie: cookie,
+      },
+    });
+    const result = resp.data?.quoteSummary?.result?.[0];
+    if (!result) return null;
+
+    const ks = result.defaultKeyStatistics || {};
+    const fd = result.financialData || {};
+    const sd = result.summaryDetail || {};
+
+    const data: ExtendedFundamentals = {
+      pe_ratio: extractNum(sd, 'trailingPE'),
+      pb_ratio: extractNum(ks, 'priceToBook'),
+      dividend_yield: extractNum(sd, 'dividendYield'),
+      eps: extractNum(ks, 'trailingEps') ?? extractNum(fd, 'earningsGrowth'),
+      market_cap: extractNum(sd, 'marketCap'),
+      week_52_high: extractNum(sd, 'fiftyTwoWeekHigh'),
+      week_52_low: extractNum(sd, 'fiftyTwoWeekLow'),
+      revenue_growth: extractNum(fd, 'revenueGrowth'),
+      profit_margin: extractNum(fd, 'profitMargins'),
+      beta: extractNum(ks, 'beta'),
+      forward_pe: extractNum(ks, 'forwardPE') ?? extractNum(sd, 'forwardPE'),
+      price_to_sales: extractNum(ks, 'priceToSalesTrailing12Months'),
+      debt_to_equity: extractNum(fd, 'debtToEquity'),
+      return_on_equity: extractNum(fd, 'returnOnEquity'),
+      free_cash_flow: extractNum(fd, 'freeCashflow'),
+      peg_ratio: extractNum(ks, 'pegRatio'),
+      analyst_target_price: extractNum(fd, 'targetMeanPrice'),
+      book_value: extractNum(ks, 'bookValue'),
+      ev_to_revenue: extractNum(ks, 'enterpriseToRevenue'),
+      ev_to_ebitda: extractNum(ks, 'enterpriseToEbitda'),
+      earnings_quarterly_growth: extractNum(fd, 'earningsQuarterlyGrowth'),
+      operating_margin: extractNum(fd, 'operatingMargins'),
+    };
+
+    setCache(cacheKey, data, 240); // 4 hours
+    return data;
+  } catch (err: any) {
+    console.warn(`[MarketData] Extended fundamentals failed for ${symbol}: ${err.message}`);
+    return null;
+  }
+}
+
+// ─── Chart data with custom intervals ───────────────────────────
+
+/**
+ * Fetch OHLCV data with a custom interval and range.
+ * Supports intraday intervals (5m, 60m) and weekly (1wk).
+ * Cache TTLs: intraday = 2min, daily = 60min, weekly = 120min.
+ */
+export async function fetchChartData(
+  symbol: string,
+  interval: string,
+  range: string,
+  market?: string,
+): Promise<HistoricalPrice[]> {
+  ensureCacheTable();
+  const cacheKey = `chart:${symbol}:${interval}:${range}`;
+  const cached = getCached<HistoricalPrice[]>(cacheKey);
+  if (cached) return cached;
+
+  // Determine cache TTL
+  let cacheTtl = HISTORICAL_CACHE_MINUTES;
+  if (interval === '5m' || interval === '60m' || interval === '15m' || interval === '30m') {
+    cacheTtl = INTRADAY_CACHE_MINUTES;
+  } else if (interval === '1wk') {
+    cacheTtl = WEEKLY_CACHE_MINUTES;
+  }
+
+  try {
+    await throttle();
+    const ySymbol = yahooSymbol(symbol, market);
+    const resp = await yahoo.get('/v8/finance/chart/' + encodeURIComponent(ySymbol), {
+      params: { interval, range },
+    });
+
+    const result = resp.data?.chart?.result?.[0];
+    if (!result) return [];
+
+    const timestamps: number[] = result.timestamp || [];
+    const q = result.indicators?.quote?.[0] || {};
+    const prices: HistoricalPrice[] = [];
+
+    const isIntraday = interval.endsWith('m');
+
+    for (let i = 0; i < timestamps.length; i++) {
+      if (q.close?.[i] == null) continue;
+      const dt = new Date(timestamps[i] * 1000);
+      prices.push({
+        date: isIntraday ? dt.toISOString() : dt.toISOString().split('T')[0],
+        open: q.open?.[i] ?? 0,
+        high: q.high?.[i] ?? 0,
+        low: q.low?.[i] ?? 0,
+        close: q.close[i],
+        volume: q.volume?.[i] ?? 0,
+      });
+    }
+
+    if (prices.length > 0) {
+      setCache(cacheKey, prices, cacheTtl);
+    }
+    return prices;
+  } catch (err: any) {
+    console.error(`[MarketData] Chart fetch failed for ${symbol} (${interval}/${range}):`, err.message);
+    return [];
+  }
 }
 
 /**

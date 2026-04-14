@@ -8,6 +8,7 @@
  * Gracefully degrades to rule-based rationale when no LLM is configured.
  */
 import { chatCompletion, isLLMAvailable, getLLMConfig } from './provider';
+import { logActivity } from '../activityLogger';
 import type { MarketData, AggregateSignalResult } from '../signals';
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -122,6 +123,24 @@ function buildUserPrompt(
     parts.push('');
   }
 
+  // Alpha Vantage enhanced fundamentals
+  const avFields: string[] = [];
+  if (marketData.forwardPE != null) avFields.push(`Forward P/E: ${marketData.forwardPE.toFixed(2)}`);
+  if (marketData.pegRatio != null) avFields.push(`PEG Ratio: ${marketData.pegRatio.toFixed(2)}`);
+  if (marketData.analystTargetPrice != null) avFields.push(`Analyst Target Price: $${marketData.analystTargetPrice.toFixed(2)}`);
+  if (marketData.beta != null) avFields.push(`Beta: ${marketData.beta.toFixed(2)}`);
+  if (marketData.bookValue != null) avFields.push(`Book Value: $${marketData.bookValue.toFixed(2)}`);
+  if (marketData.priceToBook != null) avFields.push(`Price/Book: ${marketData.priceToBook.toFixed(2)}`);
+  if (marketData.evToRevenue != null) avFields.push(`EV/Revenue: ${marketData.evToRevenue.toFixed(2)}`);
+  if (marketData.evToEbitda != null) avFields.push(`EV/EBITDA: ${marketData.evToEbitda.toFixed(2)}`);
+  if (marketData.quarterlyRevenueGrowthYOY != null) avFields.push(`Quarterly Revenue Growth YOY: ${(marketData.quarterlyRevenueGrowthYOY * 100).toFixed(1)}%`);
+  if (marketData.quarterlyEarningsGrowthYOY != null) avFields.push(`Quarterly Earnings Growth YOY: ${(marketData.quarterlyEarningsGrowthYOY * 100).toFixed(1)}%`);
+  if (avFields.length > 0) {
+    parts.push('### Enhanced Fundamentals');
+    parts.push(...avFields);
+    parts.push('');
+  }
+
   parts.push('### Your Task');
   parts.push(`The quantitative system recommends: **${aggregate.recommendation}**. Assess whether this is correct given all the context above.`);
 
@@ -205,14 +224,44 @@ export async function analyzeWithReasoning(
   }
 
   const userPrompt = buildUserPrompt(symbol, stockName, market, aggregate, marketData);
+
+  // Level 4: Log prompt summary
+  logActivity('reasoning', 'llm', `Sending to LLM: analysis of ${symbol} (${stockName}), score ${aggregate.overallScore}/100, rec ${aggregate.recommendation}`, symbol, {
+    signalCount: aggregate.signals.length,
+    overallScore: aggregate.overallScore,
+    recommendation: aggregate.recommendation,
+    promptLength: userPrompt.length,
+  }, 4);
+
+  // Level 5: Full prompt text
+  logActivity('reasoning', 'llm', `LLM full prompt for ${symbol}`, symbol, {
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt,
+  }, 5);
+
   const response = await chatCompletion(SYSTEM_PROMPT, userPrompt);
 
   if (!response) {
     console.warn(`[Reasoning] LLM call returned null for ${symbol}, using fallback`);
+    logActivity('warn', 'llm', `LLM call returned null for ${symbol}, using rule-based fallback`, symbol, undefined, 4);
     return buildFallbackResult(aggregate);
   }
 
+  // Level 4: Log response summary
   const parsed = parseLLMResponse(response.content);
+  logActivity('reasoning', 'llm', `LLM response: ${parsed.verdict ?? 'parse_failed'} with confidence ${parsed.conviction?.toFixed(2) ?? 'N/A'}`, symbol, {
+    verdict: parsed.verdict ?? null,
+    conviction: parsed.conviction ?? null,
+    tokensUsed: response.tokensUsed,
+    model: response.model,
+  }, 4);
+
+  // Level 5: Full completion text
+  logActivity('reasoning', 'llm', `LLM full completion for ${symbol}`, symbol, {
+    rawCompletion: response.content,
+    model: response.model,
+    tokensUsed: response.tokensUsed,
+  }, 5);
 
   return {
     qualitativeAssessment: parsed.assessment || aggregate.rationale,

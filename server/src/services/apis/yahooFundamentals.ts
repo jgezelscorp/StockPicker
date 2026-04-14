@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { getDb } from '../../db';
+import { ensureYahooCrumb } from '../marketData';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -93,13 +94,18 @@ export async function fetchFundamentals(symbol: string): Promise<FundamentalData
   };
 
   try {
-    const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}`;
+    const { crumb, cookie } = await ensureYahooCrumb();
+    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}`;
     const resp = await axios.get(url, {
       params: {
         modules: 'defaultKeyStatistics,financialData,summaryDetail',
+        crumb,
       },
       timeout: 15_000,
-      headers: { 'User-Agent': 'APEX/1.0' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Cookie: cookie,
+      },
     });
 
     const result = resp.data?.quoteSummary?.result?.[0];

@@ -58,6 +58,43 @@ function neutralResult(): SearchTrendData {
   };
 }
 
+// ─── Rate limiter (Google aggressively 429s/302s on burst) ──────
+
+const INTER_REQUEST_DELAY_MS = 2500;   // 2.5 s between calls
+const MAX_RETRIES = 2;
+const RETRY_BACKOFF_MS = 5000;
+
+let _lastRequestTime = 0;
+const _queue: Array<{ resolve: (v: any) => void; reject: (e: any) => void; fn: () => Promise<any> }> = [];
+let _processing = false;
+
+async function processQueue(): Promise<void> {
+  if (_processing) return;
+  _processing = true;
+  while (_queue.length > 0) {
+    const item = _queue.shift()!;
+    const now = Date.now();
+    const wait = Math.max(0, INTER_REQUEST_DELAY_MS - (now - _lastRequestTime));
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    try {
+      const result = await item.fn();
+      _lastRequestTime = Date.now();
+      item.resolve(result);
+    } catch (err) {
+      _lastRequestTime = Date.now();
+      item.reject(err);
+    }
+  }
+  _processing = false;
+}
+
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    _queue.push({ resolve, reject, fn });
+    processQueue();
+  });
+}
+
 // ─── Google Trends API ─────────────────────────────────────────
 
 /**
@@ -72,62 +109,78 @@ export async function fetchSearchTrend(symbol: string, companyName?: string): Pr
   const cached = getCached<SearchTrendData>(cacheKey);
   if (cached) return cached;
 
-  try {
-    // Dynamic import — google-trends-api is a CommonJS module
-    const googleTrends = await import('google-trends-api');
+  // Dynamic import — google-trends-api is a CommonJS module; methods are on .default
+  const mod = await import('google-trends-api');
+  const googleTrends = (mod as any).default ?? mod;
 
-    // Search for the stock ticker and company name together for better results
-    const keyword = companyName ? `${symbol} ${companyName} stock` : `${symbol} stock`;
+  const keyword = companyName ? `${symbol} ${companyName} stock` : `${symbol} stock`;
 
-    const result = await googleTrends.interestOverTime({
-      keyword,
-      startTime: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000), // 14 days ago
-      endTime: new Date(),
-      geo: '', // worldwide
-    });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result: string = await enqueue(() =>
+        googleTrends.interestOverTime({
+          keyword,
+          startTime: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000),
+          endTime: new Date(),
+          geo: '',
+        }),
+      );
 
-    const parsed = JSON.parse(result);
-    const timelineData = parsed?.default?.timelineData;
+      // Detect rate-limit HTML response before parsing JSON
+      if (result.includes('<HTML') || result.includes('302 Moved') || result.includes('/sorry/')) {
+        if (attempt < MAX_RETRIES) {
+          const backoff = RETRY_BACKOFF_MS * (attempt + 1);
+          console.warn(`[GoogleTrends] Rate limited for ${symbol}, retry ${attempt + 1} in ${backoff}ms`);
+          await new Promise(r => setTimeout(r, backoff));
+          continue;
+        }
+        console.warn(`[GoogleTrends] Rate limited for ${symbol} after ${MAX_RETRIES + 1} attempts`);
+        return neutralResult();
+      }
 
-    if (!Array.isArray(timelineData) || timelineData.length < 2) {
+      const parsed = JSON.parse(result);
+      const timelineData = parsed?.default?.timelineData;
+
+      if (!Array.isArray(timelineData) || timelineData.length < 2) {
+        return neutralResult();
+      }
+
+      const midpoint = Math.floor(timelineData.length / 2);
+      const previousData = timelineData.slice(0, midpoint);
+      const currentData = timelineData.slice(midpoint);
+
+      const avgInterest = (data: any[]): number => {
+        if (data.length === 0) return 50;
+        const sum = data.reduce((s: number, d: any) => s + (d.value?.[0] ?? 0), 0);
+        return Math.round(sum / data.length);
+      };
+
+      const currentInterest = avgInterest(currentData);
+      const previousInterest = avgInterest(previousData);
+
+      let trend: SearchTrendData['trend'] = 'stable';
+      let changePercent = 0;
+
+      if (previousInterest > 0) {
+        changePercent = Math.round(((currentInterest - previousInterest) / previousInterest) * 100);
+      }
+
+      if (changePercent > 10) trend = 'rising';
+      else if (changePercent < -10) trend = 'falling';
+
+      const data: SearchTrendData = { currentInterest, previousInterest, trend, changePercent };
+      setCache(cacheKey, data, TRENDS_CACHE_MINUTES);
+      return data;
+    } catch (err: any) {
+      if (attempt < MAX_RETRIES) {
+        console.warn(`[GoogleTrends] Attempt ${attempt + 1} failed for ${symbol}: ${err.message}`);
+        await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)));
+        continue;
+      }
+      console.warn(`[GoogleTrends] Fetch failed for ${symbol} after ${MAX_RETRIES + 1} attempts: ${err.message}`);
       return neutralResult();
     }
-
-    // Split into two halves: previous period vs current period
-    const midpoint = Math.floor(timelineData.length / 2);
-    const previousData = timelineData.slice(0, midpoint);
-    const currentData = timelineData.slice(midpoint);
-
-    const avgInterest = (data: any[]): number => {
-      if (data.length === 0) return 50;
-      const sum = data.reduce((s: number, d: any) => s + (d.value?.[0] ?? 0), 0);
-      return Math.round(sum / data.length);
-    };
-
-    const currentInterest = avgInterest(currentData);
-    const previousInterest = avgInterest(previousData);
-
-    let trend: SearchTrendData['trend'] = 'stable';
-    let changePercent = 0;
-
-    if (previousInterest > 0) {
-      changePercent = Math.round(((currentInterest - previousInterest) / previousInterest) * 100);
-    }
-
-    if (changePercent > 10) trend = 'rising';
-    else if (changePercent < -10) trend = 'falling';
-
-    const data: SearchTrendData = {
-      currentInterest,
-      previousInterest,
-      trend,
-      changePercent,
-    };
-
-    setCache(cacheKey, data, TRENDS_CACHE_MINUTES);
-    return data;
-  } catch (err: any) {
-    console.warn(`[GoogleTrends] Fetch failed for ${symbol}: ${err.message}`);
-    return neutralResult();
   }
+
+  return neutralResult();
 }

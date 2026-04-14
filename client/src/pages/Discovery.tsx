@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   useWatchlist, useSystemStatus, useDiscoverStocks,
   useRunAnalysis, useRemoveStock,
 } from '../hooks/useApi';
 import { api } from '../api/client';
+import StockDetailModal from '../components/StockDetailModal';
 
 const MARKET_FLAG: Record<string, string> = { US: '🇺🇸', EU: '🇪🇺', ASIA: '🌏' };
 const MARKET_COLOR: Record<string, string> = {
@@ -24,9 +25,58 @@ function timeAgo(iso: string | null | undefined): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return 'Never';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'Invalid date';
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
+}
+
+function getNextRunTime(lastRun: string | null | undefined): Date | null {
+  if (!lastRun) return null;
+  const d = new Date(lastRun);
+  if (isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + 4 * 60 * 60 * 1000);
+}
+
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return '00:00:00';
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+function useCountdown(targetDate: Date | null): { remaining: number; display: string } {
+  const [remaining, setRemaining] = useState<number>(() =>
+    targetDate ? Math.max(0, targetDate.getTime() - Date.now()) : 0,
+  );
+
+  useEffect(() => {
+    if (!targetDate) { setRemaining(0); return; }
+    const update = () => setRemaining(Math.max(0, targetDate.getTime() - Date.now()));
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [targetDate]);
+
+  return { remaining, display: formatCountdown(remaining) };
+}
+
 function fmtPrice(n: number | null | undefined): string {
   if (n == null) return '—';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
+
+function fmtMktCap(v: number): string {
+  if (v >= 1e12) return `$${(v / 1e12).toFixed(1)}T`;
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(0)}M`;
+  return `$${v.toLocaleString()}`;
 }
 
 export default function Discovery() {
@@ -38,6 +88,7 @@ export default function Discovery() {
 
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [addForm, setAddForm] = useState({ symbol: '', market: 'US', assetType: 'stock', sector: '' });
+  const [selectedStock, setSelectedStock] = useState<string | null>(null);
 
   function showToast(msg: string, type: 'success' | 'error' = 'success') {
     setToast({ msg, type });
@@ -86,6 +137,9 @@ export default function Discovery() {
 
   const s = status.data?.data ?? status.data ?? {};
   const apis = s.apis ?? {};
+  const lastAnalysis: string | undefined = s.lastAnalysisRun ?? s.last_analysis_run;
+  const nextRun = useMemo(() => getNextRunTime(lastAnalysis), [lastAnalysis]);
+  const countdown = useCountdown(nextRun);
   const stocks = useMemo(() => {
     const raw = watchlist.data?.data ?? watchlist.data ?? [];
     if (!Array.isArray(raw)) return [];
@@ -132,7 +186,8 @@ export default function Discovery() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.25rem' }}>
             {['yahoo_finance', 'finnhub', 'google_trends'].map((key) => {
               const label = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-              const active = apis[key] === true || apis[key] === 'configured';
+              const apiEntry = apis[key];
+              const active = apiEntry === true || apiEntry === 'configured' || apiEntry?.configured === true;
               return (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
                   <span className={`status-dot ${active ? 'status-active' : 'status-error'}`} />
@@ -144,7 +199,8 @@ export default function Discovery() {
         </div>
         <div className="card">
           <div className="card-header">Last Analysis</div>
-          <div className="card-value" style={{ fontSize: '1.1rem' }}>{timeAgo(s.lastAnalysisRun ?? s.last_analysis_run)}</div>
+          <div className="card-value" style={{ fontSize: '1.1rem' }}>{formatDateTime(lastAnalysis)}</div>
+          <div className="card-subtitle">{timeAgo(lastAnalysis)}</div>
         </div>
         <div className="card">
           <div className="card-header">Tracked Stocks</div>
@@ -153,11 +209,25 @@ export default function Discovery() {
         </div>
         <div className="card">
           <div className="card-header">Next Scheduled Run</div>
-          <div className="card-value" style={{ fontSize: '1.1rem' }}>
-            {(s.nextScheduledRun ?? s.next_scheduled_run)
-              ? new Date(s.nextScheduledRun ?? s.next_scheduled_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : 'Pending'}
-          </div>
+          {!lastAnalysis ? (
+            <div className="card-value" style={{ fontSize: '1.1rem' }}>Pending</div>
+          ) : countdown.remaining <= 0 ? (
+            <>
+              <div className="card-value" style={{ fontSize: '1.1rem', color: 'var(--accent)' }}>Running soon…</div>
+              <div className="card-subtitle">
+                was scheduled {nextRun ? nextRun.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="card-value" style={{ fontSize: '1.35rem', fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.05em', color: 'var(--accent)' }}>
+                {countdown.display}
+              </div>
+              <div className="card-subtitle">
+                at {nextRun!.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -297,6 +367,12 @@ export default function Discovery() {
                 <th className="center">Market</th>
                 <th>Sector</th>
                 <th className="right">Price</th>
+                <th className="right">P/E</th>
+                <th className="right">P/B</th>
+                <th className="right">EPS</th>
+                <th className="right">Mkt Cap</th>
+                <th className="right">52w H</th>
+                <th className="right">52w L</th>
                 <th>Last Analyzed</th>
                 <th className="right">Signals</th>
                 <th className="center">Status</th>
@@ -306,7 +382,14 @@ export default function Discovery() {
             <tbody>
               {stocks.map((stock: any) => (
                 <tr key={stock.id}>
-                  <td style={{ fontWeight: 600 }}>{stock.symbol}</td>
+                  <td
+                    style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
+                    onClick={() => setSelectedStock(stock.symbol)}
+                    onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                    onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                  >
+                    {stock.symbol}
+                  </td>
                   <td style={{ color: 'var(--text-secondary)', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {stock.name || '—'}
                   </td>
@@ -325,6 +408,12 @@ export default function Discovery() {
                     {stock.sector || '—'}
                   </td>
                   <td className="right mono">{fmtPrice(stock.current_price ?? stock.currentPrice)}</td>
+                  <td className="right mono" style={{ fontSize: '0.8rem' }}>{stock.pe_ratio != null ? stock.pe_ratio.toFixed(1) : '—'}</td>
+                  <td className="right mono" style={{ fontSize: '0.8rem' }}>{stock.pb_ratio != null ? stock.pb_ratio.toFixed(1) : '—'}</td>
+                  <td className="right mono" style={{ fontSize: '0.8rem' }}>{stock.eps != null ? stock.eps.toFixed(2) : '—'}</td>
+                  <td className="right mono" style={{ fontSize: '0.8rem' }}>{stock.market_cap != null ? fmtMktCap(stock.market_cap) : '—'}</td>
+                  <td className="right mono" style={{ fontSize: '0.8rem' }}>{stock.week_52_high != null ? fmtPrice(stock.week_52_high) : '—'}</td>
+                  <td className="right mono" style={{ fontSize: '0.8rem' }}>{stock.week_52_low != null ? fmtPrice(stock.week_52_low) : '—'}</td>
                   <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                     {timeAgo(stock.last_analyzed ?? stock.lastAnalyzed)}
                   </td>
@@ -387,7 +476,14 @@ export default function Discovery() {
             <tbody>
               {recentlyDiscovered.map((stock: any) => (
                 <tr key={stock.id}>
-                  <td style={{ fontWeight: 600 }}>{stock.symbol}</td>
+                  <td
+                    style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
+                    onClick={() => setSelectedStock(stock.symbol)}
+                    onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                    onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                  >
+                    {stock.symbol}
+                  </td>
                   <td className="center">
                     <span style={{ color: MARKET_COLOR[stock.market] || 'var(--text-muted)' }}>
                       {MARKET_FLAG[stock.market] || '🌐'} {stock.market}
@@ -411,6 +507,13 @@ export default function Discovery() {
           </table>
         )}
       </div>
+
+      {selectedStock && (
+        <StockDetailModal
+          symbolOrId={selectedStock}
+          onClose={() => setSelectedStock(null)}
+        />
+      )}
     </div>
   );
 }

@@ -1,9 +1,10 @@
-import { useMemo } from 'react';
-import { usePortfolio, usePortfolioHistory, useDashboard } from '../hooks/useApi';
+import { useState, useMemo } from 'react';
+import { usePortfolio, usePortfolioHistory, useDashboard, useAdjustCash } from '../hooks/useApi';
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
   PieChart, Pie, Cell, Legend,
 } from 'recharts';
+import StockDetailModal from '../components/StockDetailModal';
 
 function fmt(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
@@ -21,6 +22,11 @@ export default function Portfolio() {
   const positions = usePortfolio();
   const history = usePortfolioHistory(90);
   const dashboard = useDashboard();
+  const [selectedStock, setSelectedStock] = useState<string | null>(null);
+  const [showCashAdjust, setShowCashAdjust] = useState(false);
+  const [cashAmount, setCashAmount] = useState('');
+  const [cashReason, setCashReason] = useState('');
+  const adjustCash = useAdjustCash();
 
   const posData: any[] = positions.data?.data ?? [];
   const histData: any[] = history.data?.data ?? [];
@@ -51,11 +57,75 @@ export default function Portfolio() {
             <div className="card-value">{fmtCompact(portfolio.total_value)}</div>
           </div>
           <div className="card">
-            <div className="card-header">Cash Balance</div>
+            <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              Cash Balance
+              <button
+                onClick={() => setShowCashAdjust(!showCashAdjust)}
+                style={{
+                  background: 'var(--bg-tertiary)', border: '1px solid var(--border-primary)',
+                  color: 'var(--accent)', borderRadius: 4, padding: '2px 8px', fontSize: '0.7rem',
+                  cursor: 'pointer', fontWeight: 600,
+                }}
+              >
+                {showCashAdjust ? '✕' : '± Adjust'}
+              </button>
+            </div>
             <div className="card-value">{fmtCompact(portfolio.cash_balance)}</div>
             <div className="card-subtitle">
               {portfolio.total_value > 0 ? ((portfolio.cash_balance / portfolio.total_value) * 100).toFixed(1) : '0'}% of portfolio
             </div>
+            {showCashAdjust && (
+              <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="Amount (+ deposit, − withdraw)"
+                  value={cashAmount}
+                  onChange={(e) => setCashAmount(e.target.value)}
+                  style={{
+                    background: 'var(--bg-tertiary)', border: '1px solid var(--border-primary)',
+                    color: 'var(--text-primary)', borderRadius: 4, padding: '0.35rem 0.5rem',
+                    fontSize: '0.8rem', width: '100%',
+                  }}
+                />
+                <input
+                  type="text"
+                  placeholder="Reason (optional)"
+                  value={cashReason}
+                  onChange={(e) => setCashReason(e.target.value)}
+                  style={{
+                    background: 'var(--bg-tertiary)', border: '1px solid var(--border-primary)',
+                    color: 'var(--text-primary)', borderRadius: 4, padding: '0.35rem 0.5rem',
+                    fontSize: '0.8rem', width: '100%',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  <button
+                    disabled={!cashAmount || adjustCash.isPending}
+                    onClick={() => {
+                      const amt = parseFloat(cashAmount);
+                      if (!isFinite(amt) || amt === 0) return;
+                      adjustCash.mutate({ amount: amt, reason: cashReason || undefined }, {
+                        onSuccess: () => { setCashAmount(''); setCashReason(''); setShowCashAdjust(false); },
+                      });
+                    }}
+                    style={{
+                      flex: 1, background: 'var(--accent)', border: 'none', color: '#000',
+                      borderRadius: 4, padding: '0.35rem', fontSize: '0.75rem', fontWeight: 700,
+                      cursor: !cashAmount || adjustCash.isPending ? 'not-allowed' : 'pointer',
+                      opacity: !cashAmount || adjustCash.isPending ? 0.5 : 1,
+                    }}
+                  >
+                    {adjustCash.isPending ? 'Saving…' : 'Apply'}
+                  </button>
+                </div>
+                {adjustCash.isError && (
+                  <div style={{ color: 'var(--loss)', fontSize: '0.75rem' }}>
+                    {(adjustCash.error as Error).message}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="card">
             <div className="card-header">Invested</div>
@@ -171,7 +241,14 @@ export default function Portfolio() {
                 const weight = totalMarketValue > 0 ? ((p.market_value / totalMarketValue) * 100).toFixed(1) : '0.0';
                 return (
                   <tr key={p.id}>
-                    <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                    <td
+                      style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
+                      onClick={() => setSelectedStock(p.symbol)}
+                      onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                      onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                    >
+                      {p.symbol}
+                    </td>
                     <td style={{ color: 'var(--text-secondary)' }}>{p.stock_name}</td>
                     <td className="right">{p.quantity}</td>
                     <td className="right mono">{fmt(p.average_cost)}</td>
@@ -196,6 +273,13 @@ export default function Portfolio() {
           </table>
         )}
       </div>
+
+      {selectedStock && (
+        <StockDetailModal
+          symbolOrId={selectedStock}
+          onClose={() => setSelectedStock(null)}
+        />
+      )}
     </div>
   );
 }

@@ -111,12 +111,62 @@ export function initializeSchema(db: Database.Database): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- ─── Activity Log (persistent pipeline activity stream) ────────
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      level       TEXT    NOT NULL CHECK (level IN ('info','warn','error','reasoning','trade','discovery')),
+      category    TEXT    NOT NULL CHECK (category IN ('pipeline','signal','trade','portfolio','discovery','learning','system','llm')),
+      symbol      TEXT,
+      message     TEXT    NOT NULL,
+      details     TEXT,  -- JSON blob for structured data (signal scores, reasoning steps, etc.)
+      verbosity   INTEGER NOT NULL DEFAULT 3 CHECK (verbosity BETWEEN 1 AND 5),
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_activity_log_time  ON activity_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_activity_log_cat   ON activity_log(category);
+    CREATE INDEX IF NOT EXISTS idx_activity_log_level ON activity_log(level);
+
+    -- ─── Analysis Runs (pipeline execution history) ─────────────
+    CREATE TABLE IF NOT EXISTS analysis_runs (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+      completed_at      TEXT,
+      duration_ms       INTEGER,
+      stocks_analysed   INTEGER NOT NULL DEFAULT 0,
+      signals_captured  INTEGER NOT NULL DEFAULT 0,
+      trades_executed   INTEGER NOT NULL DEFAULT 0,
+      errors_count      INTEGER NOT NULL DEFAULT 0,
+      errors            TEXT,  -- JSON array of error strings
+      status            TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
+      created_at        TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Seed initial cash balance if not present
     INSERT OR IGNORE INTO system_state (key, value)
       VALUES ('cash_balance', '100000');
     INSERT OR IGNORE INTO system_state (key, value)
       VALUES ('initial_capital', '100000');
   `);
+
+  // Add fundamental columns to stocks table (safe migration)
+  const fundamentalCols = [
+    { name: 'pe_ratio', type: 'REAL' },
+    { name: 'pb_ratio', type: 'REAL' },
+    { name: 'eps', type: 'REAL' },
+    { name: 'market_cap', type: 'REAL' },
+    { name: 'week_52_high', type: 'REAL' },
+    { name: 'week_52_low', type: 'REAL' },
+    { name: 'current_price', type: 'REAL' },
+    { name: 'fundamentals_updated_at', type: 'TEXT' },
+  ];
+
+  for (const col of fundamentalCols) {
+    try {
+      db.exec(`ALTER TABLE stocks ADD COLUMN ${col.name} ${col.type}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
 
   console.log('[DB] Schema initialised');
 }

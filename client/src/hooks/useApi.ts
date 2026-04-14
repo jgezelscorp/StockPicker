@@ -135,3 +135,41 @@ export function useRemoveStock() {
     },
   });
 }
+
+export function useStockDetail(symbolOrId: string | number | null) {
+  return useQuery({
+    queryKey: ['stock-detail', symbolOrId],
+    queryFn: () => api.getStockDetail(symbolOrId!),
+    enabled: !!symbolOrId,
+    staleTime: 60_000,
+  });
+}
+
+export function useAdjustCash() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ amount, reason }: { amount: number; reason?: string }) =>
+      api.adjustCash(amount, reason),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+      qc.invalidateQueries({ queryKey: ['positions'] });
+      qc.invalidateQueries({ queryKey: ['portfolio-history'] });
+    },
+  });
+}
+
+export function useAnalysisRuns() {
+  return useQuery({
+    queryKey: ['analysis-runs'],
+    queryFn: api.getAnalysisRuns,
+    refetchInterval: REFRESH_INTERVAL,
+  });
+}
+
+export function useActivityLogs(params?: { limit?: number; category?: string; level?: string; max_verbosity?: number }) {
+  return useQuery({
+    queryKey: ['activity-logs', params],
+    queryFn: () => api.getLogs(params),
+    refetchInterval: 10_000,
+  });
+}

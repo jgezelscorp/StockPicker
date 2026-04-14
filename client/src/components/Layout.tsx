@@ -7,6 +7,7 @@ const NAV_ITEMS = [
   { to: '/portfolio', label: 'Portfolio', icon: '◉' },
   { to: '/trades', label: 'Trades', icon: '⇄' },
   { to: '/analysis', label: 'Analysis', icon: '◈' },
+  { to: '/activity', label: 'Activity Log', icon: '▤' },
 ] as const;
 
 function formatCurrency(n: number): string {

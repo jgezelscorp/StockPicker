@@ -1,8 +1,10 @@
+import { useState } from 'react';
 import { useDashboard, usePortfolioHistory, useAnalysis, useSystemStatus } from '../hooks/useApi';
 import { Link } from 'react-router-dom';
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
+import StockDetailModal from '../components/StockDetailModal';
 
 function fmt(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
@@ -32,6 +34,7 @@ export default function Dashboard() {
   const history = usePortfolioHistory(30);
   const signals = useAnalysis();
   const sysStatus = useSystemStatus();
+  const [selectedStock, setSelectedStock] = useState<string | null>(null);
 
   if (isLoading) return <div className="loading-state">Loading dashboard…</div>;
   if (error) return <div className="error-state">Error: {(error as Error).message}</div>;
@@ -87,7 +90,8 @@ export default function Dashboard() {
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
             {['yahoo_finance', 'finnhub', 'google_trends'].map((key) => {
               const label = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-              const active = sApis[key] === true || sApis[key] === 'configured';
+              const apiEntry = sApis[key];
+              const active = apiEntry === true || apiEntry === 'configured' || apiEntry?.configured === true;
               return (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
                   <span className={`status-dot ${active ? 'status-active' : 'status-error'}`} />
@@ -194,7 +198,14 @@ export default function Dashboard() {
               <tbody>
                 {d.recentTrades.slice(0, 5).map((t: any) => (
                   <tr key={t.id}>
-                    <td style={{ fontWeight: 600 }}>{t.symbol}</td>
+                     <td
+                       style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
+                       onClick={() => setSelectedStock(t.symbol)}
+                       onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                       onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                     >
+                       {t.symbol}
+                     </td>
                     <td>
                       <span className={`badge ${t.action === 'buy' ? 'badge-buy' : 'badge-sell'}`}>
                         {t.action}
@@ -230,9 +241,16 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {topSignals.map((s: any) => (
+                 {topSignals.map((s: any) => (
                   <tr key={s.id}>
-                    <td style={{ fontWeight: 600 }}>{s.symbol}</td>
+                    <td
+                      style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
+                      onClick={() => setSelectedStock(s.symbol)}
+                      onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                      onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                    >
+                      {s.symbol}
+                    </td>
                     <td className="right mono" style={{ color: s.composite_score >= 0 ? 'var(--profit)' : 'var(--loss)' }}>
                       {s.composite_score >= 0 ? '+' : ''}{s.composite_score.toFixed(3)}
                     </td>
@@ -254,6 +272,13 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {selectedStock && (
+        <StockDetailModal
+          symbolOrId={selectedStock}
+          onClose={() => setSelectedStock(null)}
+        />
+      )}
     </div>
   );
 }

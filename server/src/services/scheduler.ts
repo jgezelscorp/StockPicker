@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { getDb } from '../db';
 import { DEFAULT_SCHEDULER_CONFIG, DEFAULT_SIGNAL_WEIGHTS, type SchedulerConfig, type PipelineRunResult } from '../types';
-import { fetchStockQuote, fetchHistoricalPrices, fetchFundamentals, refreshPositionPrices, purgeExpiredCache } from './marketData';
+import { fetchStockQuote, fetchHistoricalPrices, fetchFundamentals, fetchExtendedFundamentals, refreshPositionPrices, purgeExpiredCache } from './marketData';
 import {
   evaluateSignals,
   shouldBuy,
@@ -17,6 +17,7 @@ import { fetchCompanyNews } from './apis/finnhub';
 import { fetchSearchTrend } from './apis/googleTrends';
 import { seedInitialUniverse, discoverNewStocks, pruneInactiveStocks } from './stockDiscovery';
 import { analyzeWithReasoning, buildEnhancedRationale } from './llm';
+import { logActivity } from './activityLogger';
 
 let activeTasks: cron.ScheduledTask[] = [];
 
@@ -210,8 +211,17 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
     durationMs: 0,
   };
 
+  let analysisRunId: number | null = null;
+
   try {
     const db = getDb();
+
+    // Record the analysis run
+    const insertRun = db.prepare(`
+      INSERT INTO analysis_runs (started_at, status) VALUES (datetime('now'), 'running')
+    `);
+    const runInfo = insertRun.run();
+    analysisRunId = Number(runInfo.lastInsertRowid);
 
     // Get all active stocks
     const stocks = db.prepare('SELECT * FROM stocks WHERE is_active = 1').all() as any[];
@@ -219,38 +229,67 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
 
     if (stocks.length === 0) {
       console.log('[Scheduler] No active stocks to analyse');
+      logActivity('info', 'pipeline', 'No active stocks to analyse', undefined, undefined, 2);
       result.durationMs = Date.now() - start;
       return result;
     }
 
     console.log(`[Scheduler] Analysing ${stocks.length} stocks...`);
+    logActivity('info', 'pipeline', 'Analysis pipeline started', undefined, { stockCount: stocks.length }, 2);
 
     for (const stock of stocks) {
       try {
+        logActivity('info', 'signal', 'Collecting signals...', stock.symbol, undefined, 3);
+
         // 1) Fetch market data for the signal pipeline
+        const fetchStartHistory = Date.now();
         const history = await fetchHistoricalPrices(stock.symbol, '3mo', stock.market);
+        const historyMs = Date.now() - fetchStartHistory;
+        logActivity('info', 'signal', `Fetched ${history.length} historical prices (${historyMs}ms)`, stock.symbol, { count: history.length, durationMs: historyMs }, 5);
+
+        const fetchStartQuote = Date.now();
         const quote = await fetchStockQuote(stock.symbol, stock.market);
+        const quoteMs = Date.now() - fetchStartQuote;
+        logActivity('info', 'signal', `Quote fetched: $${quote?.price?.toFixed(2) ?? 'N/A'} (${quoteMs}ms)`, stock.symbol, { price: quote?.price, durationMs: quoteMs }, 5);
 
         // 2) Fetch real fundamentals, news, and search trends (each wrapped in try/catch)
         let fundamentals: Awaited<ReturnType<typeof fetchFundamentals>> | null = null;
         try {
+          const t0 = Date.now();
           fundamentals = await fetchFundamentals(stock.symbol);
+          logActivity('info', 'signal', `Fundamentals fetched (${Date.now() - t0}ms)`, stock.symbol, { durationMs: Date.now() - t0, peRatio: fundamentals?.peRatio ?? null }, 5);
         } catch (err: any) {
           console.warn(`[Scheduler] Fundamentals fetch failed for ${stock.symbol}: ${err.message}`);
         }
 
         let newsArticles: Awaited<ReturnType<typeof fetchCompanyNews>> = [];
         try {
+          const t0 = Date.now();
           newsArticles = await fetchCompanyNews(stock.symbol);
+          logActivity('info', 'signal', `News fetched: ${newsArticles.length} articles (${Date.now() - t0}ms)`, stock.symbol, { count: newsArticles.length, durationMs: Date.now() - t0 }, 5);
         } catch (err: any) {
           console.warn(`[Scheduler] News fetch failed for ${stock.symbol}: ${err.message}`);
         }
 
         let searchTrend: Awaited<ReturnType<typeof fetchSearchTrend>> | null = null;
         try {
+          const t0 = Date.now();
           searchTrend = await fetchSearchTrend(stock.symbol, stock.name);
+          logActivity('info', 'signal', `Search trend fetched (${Date.now() - t0}ms): ${searchTrend?.trend ?? 'N/A'}`, stock.symbol, { durationMs: Date.now() - t0, trend: searchTrend?.trend ?? null }, 5);
         } catch (err: any) {
           console.warn(`[Scheduler] Search trend fetch failed for ${stock.symbol}: ${err.message}`);
+        }
+
+        // 2c) Yahoo extended fundamentals (supplementary, never required)
+        let extFundamentals: Awaited<ReturnType<typeof fetchExtendedFundamentals>> | null = null;
+        try {
+          const t0 = Date.now();
+          extFundamentals = await fetchExtendedFundamentals(stock.symbol);
+          if (extFundamentals) {
+            logActivity('info', 'signal', `Yahoo extended fundamentals fetched (${Date.now() - t0}ms)`, stock.symbol, { durationMs: Date.now() - t0, forwardPE: extFundamentals.forward_pe }, 5);
+          }
+        } catch (err: any) {
+          console.warn(`[Scheduler] Yahoo extended fundamentals fetch failed for ${stock.symbol}: ${err.message}`);
         }
 
         // Build MarketData for the signal analysers — now with real data
@@ -291,7 +330,28 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
             trend: searchTrend.trend,
             changePercent: searchTrend.changePercent,
           } : undefined,
+          // Yahoo extended fundamentals enrichment (supplementary)
+          forwardPE: extFundamentals?.forward_pe ?? undefined,
+          pegRatio: extFundamentals?.peg_ratio ?? undefined,
+          analystTargetPrice: extFundamentals?.analyst_target_price ?? undefined,
+          beta: extFundamentals?.beta ?? undefined,
+          bookValue: extFundamentals?.book_value ?? undefined,
+          priceToBook: extFundamentals?.pb_ratio ?? undefined,
+          evToRevenue: extFundamentals?.ev_to_revenue ?? undefined,
+          evToEbitda: extFundamentals?.ev_to_ebitda ?? undefined,
+          quarterlyRevenueGrowthYOY: extFundamentals?.revenue_growth ?? undefined,
+          quarterlyEarningsGrowthYOY: extFundamentals?.earnings_quarterly_growth ?? undefined,
         };
+
+        // Log full signal data at debug level
+        logActivity('info', 'signal', 'Full market data assembled', stock.symbol, {
+          currentPrice: marketData.currentPrice,
+          historyPoints: closes.length,
+          hasFundamentals: fundamentals != null,
+          newsCount: newsArticles.length,
+          hasSearchTrend: searchTrend != null,
+          hasYahooExtended: extFundamentals != null,
+        }, 5);
 
         // 2) Run the structured signal pipeline (valuation, trend, sentiment, search)
         const currentWeights = getCurrentWeights();
@@ -305,11 +365,75 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
         const aggregate = await analyzeStock(stock, marketData, weightEntries);
         result.signalsCaptured += aggregate.signals.length;
 
+        logActivity('info', 'signal', 'Signal analysis complete', stock.symbol, {
+          compositeScore: aggregate.compositeScore,
+          confidence: aggregate.overallConfidence,
+          recommendation: aggregate.recommendation,
+          signalBreakdown: Object.fromEntries(
+            aggregate.weightedBreakdown.map(wb => [wb.source, { score: wb.score, weighted: wb.weightedScore }])
+          ),
+        }, 3);
+
+        // Level 4: Log each individual signal score with details
+        for (const sig of aggregate.signals) {
+          logActivity('info', 'signal', `Signal ${sig.source}: ${sig.score}/100 (${sig.direction}, confidence ${(sig.confidence * 100).toFixed(0)}%)`, stock.symbol, {
+            source: sig.source,
+            score: sig.score,
+            direction: sig.direction,
+            confidence: sig.confidence,
+            reasoning: sig.reasoning,
+          }, 4);
+        }
+
+        // Level 4: Log composite score calculation breakdown
+        logActivity('info', 'signal', `Composite score breakdown: ${aggregate.compositeScore.toFixed(3)} (${aggregate.recommendation})`, stock.symbol, {
+          compositeScore: aggregate.compositeScore,
+          overallConfidence: aggregate.overallConfidence,
+          direction: aggregate.direction,
+          weightedBreakdown: aggregate.weightedBreakdown.map(wb => ({
+            source: wb.source,
+            rawScore: wb.score,
+            weight: wb.weight,
+            weightedScore: wb.weightedScore,
+          })),
+        }, 4);
+
         // 2b) Run LLM qualitative reasoning (gracefully skipped if no LLM configured)
+        const llmStart = Date.now();
         const reasoning = await analyzeWithReasoning(
           stock.symbol, stock.name || stock.symbol, stock.market,
           aggregate, marketData,
         );
+        const llmMs = Date.now() - llmStart;
+
+        if (reasoning.llmUsed) {
+          logActivity('reasoning', 'llm', `LLM reasoning: ${reasoning.llmVerdict}`, stock.symbol, {
+            verdict: reasoning.llmVerdict,
+            conviction: reasoning.llmConviction,
+            reasoning: reasoning.qualitativeAssessment || null,
+          }, 3);
+
+          // Level 4: LLM response summary
+          logActivity('reasoning', 'llm', `LLM response: ${reasoning.llmVerdict} with conviction ${reasoning.llmConviction.toFixed(2)}`, stock.symbol, {
+            verdict: reasoning.llmVerdict,
+            conviction: reasoning.llmConviction,
+            tokensUsed: reasoning.tokensUsed,
+            durationMs: llmMs,
+            risks: reasoning.keyRisks,
+            catalysts: reasoning.keyCatalysts,
+          }, 4);
+
+          // Level 5: Full LLM assessment detail and timing
+          logActivity('reasoning', 'llm', `LLM full assessment for ${stock.symbol}`, stock.symbol, {
+            fullAssessment: reasoning.qualitativeAssessment,
+            verdict: reasoning.llmVerdict,
+            conviction: reasoning.llmConviction,
+            risks: reasoning.keyRisks,
+            catalysts: reasoning.keyCatalysts,
+            tokensUsed: reasoning.tokensUsed,
+            durationMs: llmMs,
+          }, 5);
+        }
 
         // Persist individual signals from the pipeline
         const insertSignal = db.prepare(`
@@ -341,6 +465,24 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
           }),
           aggregate.recommendation,
           enhancedRationale
+        );
+
+        // Update stock fundamental cache
+        db.prepare(`
+          UPDATE stocks SET
+            pe_ratio = ?, pb_ratio = ?, eps = ?, market_cap = ?,
+            week_52_high = ?, week_52_low = ?, current_price = ?,
+            fundamentals_updated_at = datetime('now')
+          WHERE id = ?
+        `).run(
+          marketData.peRatio ?? null,
+          marketData.pbRatio ?? null,
+          marketData.eps ?? null,
+          marketData.marketCap ?? null,
+          marketData.week52High ?? null,
+          marketData.week52Low ?? null,
+          marketData.currentPrice ?? null,
+          stock.id
         );
 
         // 3) Get current price for trading decisions
@@ -375,6 +517,10 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
             signalSnapshot: JSON.stringify(aggregate.weightedBreakdown),
           });
           result.tradesExecuted++;
+          logActivity('trade', 'trade', `BUY executed: ${buyDecision.quantity} shares at $${quote.price.toFixed(2)}`, stock.symbol, {
+            action: 'buy', quantity: buyDecision.quantity, price: quote.price,
+            confidence: evaluation.confidence, rationale: buyDecision.reason,
+          }, 1);
         }
 
         const sellDecision = shouldSell(stock.symbol, evaluation, quote.price);
@@ -390,6 +536,16 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
             signalSnapshot: JSON.stringify(aggregate.weightedBreakdown),
           });
           result.tradesExecuted++;
+          logActivity('trade', 'trade', `SELL executed: ${sellDecision.quantity} shares at $${quote.price.toFixed(2)}`, stock.symbol, {
+            action: 'sell', quantity: sellDecision.quantity, price: quote.price,
+            confidence: evaluation.confidence, rationale: sellDecision.reason,
+          }, 1);
+        }
+
+        if (!buyDecision.shouldTrade && !sellDecision.shouldTrade) {
+          logActivity('info', 'trade', 'No trade — confidence below threshold', stock.symbol, {
+            confidence: evaluation.confidence, threshold: 0.72,
+          }, 3);
         }
 
         const llmTag = reasoning.llmUsed ? ` [LLM: ${reasoning.llmVerdict}]` : '';
@@ -400,6 +556,7 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
       } catch (err: any) {
         result.errors.push(`${stock.symbol}: ${err.message}`);
         console.error(`[Scheduler] Error processing ${stock.symbol}:`, err.message);
+        logActivity('error', 'pipeline', `Error processing stock: ${err.message}`, stock.symbol, { error: err.message }, 1);
       }
     }
 
@@ -419,9 +576,65 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
       `[Scheduler] Pipeline complete: ${result.stocksAnalysed} analysed, ` +
       `${result.signalsCaptured} signals, ${result.tradesExecuted} trades`
     );
+    logActivity('info', 'pipeline', 'Pipeline complete', undefined, {
+      stocksAnalysed: result.stocksAnalysed,
+      signalsCaptured: result.signalsCaptured,
+      tradesExecuted: result.tradesExecuted,
+      durationMs: Date.now() - start,
+    }, 2);
+
+    // Update analysis run record with results
+    if (analysisRunId !== null) {
+      db.prepare(`
+        UPDATE analysis_runs
+        SET completed_at = datetime('now'),
+            duration_ms = ?,
+            stocks_analysed = ?,
+            signals_captured = ?,
+            trades_executed = ?,
+            errors_count = ?,
+            errors = ?,
+            status = 'completed'
+        WHERE id = ?
+      `).run(
+        Date.now() - start,
+        result.stocksAnalysed,
+        result.signalsCaptured,
+        result.tradesExecuted,
+        result.errors.length,
+        result.errors.length > 0 ? JSON.stringify(result.errors) : null,
+        analysisRunId,
+      );
+    }
   } catch (err: any) {
     result.errors.push(err.message || String(err));
     console.error('[Scheduler] Pipeline error:', err);
+    logActivity('error', 'pipeline', `Pipeline error: ${err.message || String(err)}`, undefined, undefined, 1);
+
+    // Mark analysis run as failed
+    if (analysisRunId !== null) {
+      try {
+        const db = getDb();
+        db.prepare(`
+          UPDATE analysis_runs
+          SET completed_at = datetime('now'),
+              duration_ms = ?,
+              stocks_analysed = ?,
+              errors_count = ?,
+              errors = ?,
+              status = 'failed'
+          WHERE id = ?
+        `).run(
+          Date.now() - start,
+          result.stocksAnalysed,
+          1,
+          JSON.stringify([err.message || String(err)]),
+          analysisRunId,
+        );
+      } catch (updateErr) {
+        console.error('[Scheduler] Failed to update analysis run record:', updateErr);
+      }
+    }
   }
 
   result.durationMs = Date.now() - start;
@@ -434,9 +647,14 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
  */
 function takePortfolioSnapshot(): void {
   try {
-    takePortfolioSnapshotFromTracker();
-  } catch (err) {
+    const snapshot = takePortfolioSnapshotFromTracker();
+    logActivity('info', 'portfolio', 'Portfolio snapshot taken', undefined, {
+      totalValue: (snapshot as any)?.total_value ?? null,
+      cashBalance: (snapshot as any)?.cash_balance ?? null,
+    }, 2);
+  } catch (err: any) {
     console.error('[Scheduler] Snapshot error:', err);
+    logActivity('error', 'portfolio', `Snapshot error: ${err.message || String(err)}`, undefined, undefined, 1);
   }
 }
 
@@ -446,11 +664,9 @@ function takePortfolioSnapshot(): void {
  */
 function runLearningEvaluation(): void {
   try {
-    // Evaluate past decisions and record outcomes
     const outcomes = evaluatePastDecisions();
     console.log(`[Scheduler] Learning engine evaluated ${outcomes.length} past decisions`);
 
-    // Adjust signal weights based on outcomes
     const adjustments = adjustWeights(outcomes);
     if (adjustments.length > 0) {
       console.log(`[Scheduler] Adjusted ${adjustments.length} signal weights:`);
@@ -458,8 +674,14 @@ function runLearningEvaluation(): void {
         console.log(`  ${adj.source}: ${(adj.oldWeight * 100).toFixed(1)}% → ${(adj.newWeight * 100).toFixed(1)}% (${adj.reason})`);
       }
     }
-  } catch (err) {
+
+    logActivity('info', 'learning', `Learning evaluation: ${outcomes.length} outcomes evaluated`, undefined, {
+      outcomes: outcomes.length,
+      adjustments: adjustments.length,
+    }, 2);
+  } catch (err: any) {
     console.error('[Scheduler] Learning evaluation error:', err);
+    logActivity('error', 'learning', `Learning evaluation error: ${err.message || String(err)}`, undefined, undefined, 1);
   }
 }
 
@@ -503,6 +725,11 @@ export function startScheduler(config: SchedulerConfig = DEFAULT_SCHEDULER_CONFI
 
   // Take an initial snapshot on startup
   takePortfolioSnapshot();
+  logActivity('info', 'system', 'Scheduler started — autonomous pipeline active', undefined, {
+    analysisCron: config.analysisCron,
+    snapshotCron: config.snapshotCron,
+    learningCron: config.learningCron,
+  }, 2);
   console.log('[Scheduler] All tasks scheduled');
 }
 
@@ -520,6 +747,10 @@ export { runAnalysisPipeline, takePortfolioSnapshot, runLearningEvaluation };
 async function runStockDiscovery(): Promise<{ discovered: number; pruned: number }> {
   const discovered = await discoverNewStocks();
   const pruned = pruneInactiveStocks();
+  logActivity('discovery', 'discovery', `Stock discovery: found ${discovered} new stocks`, undefined, {
+    newStocks: discovered,
+    pruned,
+  }, 2);
   return { discovered, pruned };
 }
 
