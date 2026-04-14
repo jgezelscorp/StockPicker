@@ -96,7 +96,7 @@ export default function Trades() {
       <div className="card">
         {trades.length === 0 ? (
           <div className="empty-state">
-            <p>No trades match your filters. The agent trades autonomously when confidence ≥ 72%.</p>
+            <p>No trades match your filters. The agent trades autonomously when confidence ≥ 55%.</p>
           </div>
         ) : (
           <table className="data-table">

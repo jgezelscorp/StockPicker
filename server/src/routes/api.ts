@@ -143,7 +143,22 @@ router.get('/trades', (req, res) => {
       pageSize: parseInt(req.query.pageSize as string) || 20,
     };
     const result = getTradeHistory(filters);
-    res.json({ success: true, ...result });
+    // Map camelCase trade records to snake_case for frontend
+    const data = result.trades.map(t => ({
+      id: t.id,
+      stock_id: t.stockId,
+      symbol: t.symbol,
+      stock_name: t.stockName,
+      action: t.action,
+      quantity: t.quantity,
+      price_per_share: t.pricePerShare,
+      total_value: t.totalValue,
+      confidence: t.confidence,
+      rationale: t.rationale,
+      signal_snapshot: t.signalSnapshot,
+      executed_at: t.executedAt,
+    }));
+    res.json({ success: true, data, total: result.total, page: result.page, page_size: result.pageSize });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
