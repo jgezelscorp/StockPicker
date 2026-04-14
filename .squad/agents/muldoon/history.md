@@ -155,3 +155,13 @@
 - **Graceful Degradation:** If Finnhub API key missing, LLM unavailable, or rate limits hit, monitor logs warning and exits cleanly. Scheduled analysis continues unaffected.
 - **Activity Logging:** All reactive events logged at verbosity 2-3 (Important/Normal) — event detection, LLM impact classification, trades executed, duration. Full LLM prompts at v5 for debugging.
 - **Build Verified:** Clean `tsc --noEmit` compilation. All type conversions (AggregateSignalResult → EvaluationResult, snake_case API fields, logActivity signature) correct.
+
+### 2026-07-14 — ETF-Specific Trading Rules
+- **Problem:** Trading engine treated ETFs identically to stocks — wrong for instruments with longer horizons and built-in diversification.
+- **Solution:** Introduced `AssetThresholds` interface and separate `STOCK_THRESHOLDS` / `ETF_THRESHOLDS` constants in `tradingEngine.ts`. `shouldBuy()` and `shouldSell()` now accept optional `assetType` parameter (defaults to `'stock'`).
+- **ETF Buy Rules:** Higher confidence entry (60% vs 55%), larger max position (20% vs 15% of portfolio), higher starter-tier multiplier (0.50 vs 0.40).
+- **ETF Sell Rules:** Wider stop-loss (-15% vs -8%), higher sell confidence threshold (50% vs 40%), stronger protective sell threshold (composite < -0.25 vs -0.1), 14-day minimum holding period with emergency exit at 2x stop-loss (-30%).
+- **Scheduler Integration:** `scheduler.ts` already had `assetType` in scope (line 261). Updated both `shouldBuy` and `shouldSell` calls to pass it through.
+- **Pattern:** All thresholds logged in trade rationale with `[ETF]`/`[Stock]` tags for audit trail.
+- **Key Files:** `server/src/services/tradingEngine.ts` (thresholds + decision logic), `server/src/services/scheduler.ts` (pass-through).
+- **Build Verified:** Clean `tsc --noEmit`.

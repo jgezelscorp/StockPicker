@@ -11,12 +11,12 @@ import type { SignalResult, MarketData } from './index';
  * - Longer-term trend analysis (weeks/months, not days)
  * - Individual valuation metrics (P/E) less meaningful
  * 
- * Signal weights for ETFs:
- * - macro_trend: 30% (macro/geopolitical/economic analysis)
+ * Signal weights for ETFs (longer-horizon tuned):
+ * - macro_trend: 35% (macro/geopolitical/economic — highest priority)
  * - sector_momentum: 25% (sector performance & rotation)
  * - market_sentiment: 20% (broad market news sentiment)
- * - search_interest: 15% (longer-term sustained interest)
- * - valuation: 10% (basic valuation, lower weight)
+ * - search_interest: 10% (sustained interest, minimal contrarian penalty)
+ * - valuation: 10% (basic valuation + P/B + expense awareness)
  */
 
 // ─── Macro Trend Signal ──────────────────────────────────────────
@@ -46,22 +46,31 @@ export async function analyzeMacroTrend(
     };
   }
 
-  // Keywords indicating macro/geopolitical themes
+  // Keywords indicating macro/geopolitical themes (expanded for ETF sector themes)
   const macroKeywords = {
     bullish: [
       'rate cut', 'stimulus', 'easing', 'recovery', 'growth acceleration',
       'trade deal', 'infrastructure bill', 'tax cut', 'bullish outlook',
       'expansion', 'positive economic', 'strong gdp', 'job growth',
+      'energy policy', 'green energy', 'clean energy', 'renewable',
+      'central bank dovish', 'quantitative easing', 'housing recovery',
+      'consumer confidence', 'manufacturing expansion', 'supply chain improvement',
+      'commodity rally', 'emerging market growth', 'fiscal spending',
+      'technological adoption', 'ai investment', 'defense spending',
     ],
     bearish: [
       'rate hike', 'inflation', 'recession', 'slowdown', 'contraction',
       'trade war', 'tariff', 'sanctions', 'regulatory crackdown',
       'economic uncertainty', 'downturn', 'weak gdp', 'unemployment',
+      'energy crisis', 'central bank hawkish', 'quantitative tightening',
+      'housing market decline', 'consumer spending decline', 'debt ceiling',
+      'supply chain disruption', 'commodity crash', 'currency crisis',
+      'geopolitical conflict', 'pandemic', 'banking crisis', 'credit crunch',
     ],
   };
 
   const now = Date.now();
-  const HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (longer-term for ETFs)
+  const HALF_LIFE_MS = 18 * 24 * 60 * 60 * 1000; // 18 days — ETF macro trends persist longer than stock news
 
   let bullishScore = 0;
   let bearishScore = 0;
@@ -99,7 +108,7 @@ export async function analyzeMacroTrend(
     // Recency weighting (longer half-life for ETFs)
     const ageMs = Math.max(0, now - new Date(article.publishedAt).getTime());
     const recencyWeight = Math.pow(0.5, ageMs / HALF_LIFE_MS);
-    const w = Math.max(0.15, recencyWeight);
+    const w = Math.max(0.25, recencyWeight); // Higher floor: older macro context still valuable for ETFs
 
     // Combine keyword analysis with pre-computed sentiment
     const keywordSignal = localBullish - localBearish;
@@ -172,30 +181,34 @@ export async function analyzeSectorMomentum(
   const prices = marketData.priceHistory || [];
   const currentPrice = marketData.currentPrice;
 
-  if (prices.length < 20 || !currentPrice) {
+  if (prices.length < 40 || !currentPrice) {
     return {
-      source: 'price_trend', // Using price_trend as source since we don't have sector_momentum in SignalSource type
+      source: 'price_trend',
       score: 50,
       confidence: 0.15,
       direction: 'neutral',
-      reasoning: 'Insufficient price history for sector momentum analysis (need 20+ days).',
+      reasoning: 'Insufficient price history for ETF sector momentum analysis (need 40+ days).',
       breakdown: { dataAvailable: false },
     };
   }
 
-  // Calculate short-term (20-day) and medium-term (60-day) performance
-  const shortTermPrices = prices.slice(-20);
-  const mediumTermPrices = prices.slice(-60);
+  // ETF-tuned lookback windows: 40-day short, 120-day medium, 200-day long-term
+  const shortTermPrices = prices.slice(-40);
+  const mediumTermPrices = prices.slice(-120);
+  const longTermPrices = prices.slice(-200);
 
   const shortTermReturn = (currentPrice - shortTermPrices[0]) / shortTermPrices[0];
-  const mediumTermReturn = mediumTermPrices.length >= 60
+  const mediumTermReturn = mediumTermPrices.length >= 120
     ? (currentPrice - mediumTermPrices[0]) / mediumTermPrices[0]
     : shortTermReturn;
+  const longTermReturn = longTermPrices.length >= 200
+    ? (currentPrice - longTermPrices[0]) / longTermPrices[0]
+    : mediumTermReturn;
 
-  // Calculate momentum acceleration (short-term vs medium-term)
+  // Momentum acceleration (short-term vs medium-term)
   const momentumAcceleration = shortTermReturn - mediumTermReturn;
 
-  // Calculate volatility (measure of risk)
+  // Calculate volatility over the short-term window
   const returns = shortTermPrices.map((p, i) =>
     i === 0 ? 0 : (p - shortTermPrices[i - 1]) / shortTermPrices[i - 1]
   );
@@ -203,23 +216,24 @@ export async function analyzeSectorMomentum(
   const variance = returns.reduce((s, r) => s + Math.pow(r - avgReturn, 2), 0) / returns.length;
   const volatility = Math.sqrt(variance);
 
-  // Score based on trend and momentum
-  // Positive trend + accelerating = high score
-  // Negative trend + decelerating = low score
+  // Score based on trend and momentum — ETFs weight medium/long-term more
   let score = 50;
-  
-  // Base score on medium-term return
-  const trendScore = Math.max(-50, Math.min(50, mediumTermReturn * 200));
-  
-  // Momentum adjustment (acceleration bonus)
-  const momentumBonus = Math.max(-15, Math.min(15, momentumAcceleration * 150));
-  
-  score = Math.round(50 + trendScore + momentumBonus);
+
+  // Base score on medium-term return (primary for ETFs)
+  const trendScore = Math.max(-40, Math.min(40, mediumTermReturn * 180));
+
+  // Long-term trend comparison: bonus if 200-day trend is positive
+  const longTermBonus = Math.max(-10, Math.min(10, longTermReturn * 50));
+
+  // Momentum adjustment (smaller weight — ETFs should be patient with dips)
+  const momentumBonus = Math.max(-8, Math.min(8, momentumAcceleration * 80));
+
+  score = Math.round(50 + trendScore + longTermBonus + momentumBonus);
   score = Math.max(0, Math.min(100, score));
 
-  // Confidence: higher with more data and lower volatility
-  const dataScore = Math.min(1, prices.length / 120); // full confidence at 120 days
-  const volatilityPenalty = Math.min(0.3, volatility * 10); // high vol reduces confidence
+  // Confidence: full confidence at 200 days; reduced volatility penalty for ETFs
+  const dataScore = Math.min(1, prices.length / 200);
+  const volatilityPenalty = Math.min(0.2, volatility * 6); // Reduced penalty: ETFs tolerate dips better
   const confidence = Math.round(Math.max(0.2, Math.min(0.9, 0.5 + dataScore * 0.3 - volatilityPenalty)) * 100) / 100;
 
   const direction = score >= 60 ? 'bullish' as const
@@ -231,16 +245,17 @@ export async function analyzeSectorMomentum(
     score,
     confidence,
     direction,
-    reasoning: `Sector momentum: ${
+    reasoning: `Sector momentum (ETF): ${
       momentumAcceleration > 0.02
         ? 'accelerating upward'
         : momentumAcceleration < -0.02
           ? 'decelerating'
           : 'stable'
-    }. 20-day return: ${(shortTermReturn * 100).toFixed(1)}%, 60-day: ${(mediumTermReturn * 100).toFixed(1)}%.`,
+    }. 40-day return: ${(shortTermReturn * 100).toFixed(1)}%, 120-day: ${(mediumTermReturn * 100).toFixed(1)}%, 200-day: ${(longTermReturn * 100).toFixed(1)}%.`,
     breakdown: {
       shortTermReturn: Math.round(shortTermReturn * 10000) / 100,
       mediumTermReturn: Math.round(mediumTermReturn * 10000) / 100,
+      longTermReturn: Math.round(longTermReturn * 10000) / 100,
       momentumAcceleration: Math.round(momentumAcceleration * 10000) / 100,
       volatility: Math.round(volatility * 10000) / 100,
       dataPoints: prices.length,
@@ -276,7 +291,7 @@ export async function analyzeMarketSentiment(
   }
 
   const now = Date.now();
-  const HALF_LIFE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days (longer for ETFs than stocks)
+  const HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — ETF sentiment is stickier than stock sentiment
 
   let weightedSum = 0;
   let totalWeight = 0;
@@ -284,15 +299,33 @@ export async function analyzeMarketSentiment(
   for (const article of newsArticles) {
     const ageMs = Math.max(0, now - new Date(article.publishedAt).getTime());
     const recencyWeight = Math.pow(0.5, ageMs / HALF_LIFE_MS);
-    const w = Math.max(0.12, recencyWeight);
+    const w = Math.max(0.20, recencyWeight); // Higher floor for ETF sentiment longevity
     
     weightedSum += article.sentiment * w;
     totalWeight += w;
   }
 
+  // Consensus bonus: broader agreement matters more for ETFs
+  let consensusBoost = 0;
+  {
+    let positive = 0;
+    let negative = 0;
+    for (const a of newsArticles) {
+      if (a.sentiment > 0.1) positive++;
+      else if (a.sentiment < -0.1) negative++;
+    }
+    const dominant = Math.max(positive, negative);
+    const consensusRatio = newsArticles.length > 1 ? dominant / newsArticles.length : 0.5;
+    // Strong consensus amplifies the signal direction for ETFs
+    if (consensusRatio > 0.7) {
+      const avgSentimentDir = totalWeight > 0 ? weightedSum / totalWeight : 0;
+      consensusBoost = avgSentimentDir * (consensusRatio - 0.5) * 15;
+    }
+  }
+
   const avgSentiment = totalWeight > 0 ? weightedSum / totalWeight : 0;
 
-  // Measure consensus
+  // Measure consensus (reuse from boost calculation)
   let positive = 0;
   let negative = 0;
   for (const a of newsArticles) {
@@ -302,8 +335,8 @@ export async function analyzeMarketSentiment(
   const dominant = Math.max(positive, negative);
   const consensusRatio = newsArticles.length > 1 ? dominant / newsArticles.length : 0.5;
 
-  // Map sentiment [-1, +1] to score [0, 100]
-  let score = Math.round(50 + avgSentiment * 40);
+  // Map sentiment [-1, +1] to score [0, 100], then apply consensus boost
+  let score = Math.round(50 + avgSentiment * 40 + consensusBoost);
   score = Math.max(0, Math.min(100, score));
 
   // Confidence: scales with article count and consensus
@@ -363,22 +396,21 @@ export async function analyzeSearchInterestETF(
   let score: number;
   let confidence: number;
 
-  // For ETFs, sustained high interest is more positive than for stocks
-  // We reduce the contrarian penalty
+  // For ETFs, sustained high interest is a positive signal, not contrarian
   if (trend === 'rising') {
     const magnitudeBonus = Math.min(25, Math.abs(changePercent) * 0.5);
-    score = 55 + magnitudeBonus;
+    score = 58 + magnitudeBonus; // Higher base: rising interest is bullish for ETFs
 
-    // Less contrarian penalty for ETFs - sustained interest is normal
-    if (currentInterest > 85) {
-      score -= 5; // smaller penalty than stocks
+    // Minimal contrarian penalty — sustained ETF interest is normal
+    if (currentInterest > 90) {
+      score -= 3; // Almost no penalty
     }
   } else if (trend === 'falling') {
     const magnitudePenalty = Math.min(25, Math.abs(changePercent) * 0.5);
     score = 45 - magnitudePenalty;
   } else {
-    // Stable: favor higher absolute interest for ETFs
-    score = 48 + Math.min(12, currentInterest / 8);
+    // Stable: sustained high interest is a positive for ETFs
+    score = 50 + Math.min(15, currentInterest / 6);
   }
 
   score = Math.max(0, Math.min(100, Math.round(score)));
@@ -423,7 +455,7 @@ export async function analyzeValuationETF(
 ): Promise<SignalResult> {
   const { peRatio, pbRatio, dividendYield } = marketData;
 
-  // For ETFs, focus on P/E and dividend yield primarily
+  // For ETFs, evaluate P/E, P/B, and dividend yield
   const metrics: Array<{ name: string; score: number; weight: number }> = [];
 
   // P/E scoring (relative to market average of 20)
@@ -431,13 +463,21 @@ export async function analyzeValuationETF(
     const marketAvgPE = 20;
     const deviation = (marketAvgPE - peRatio) / marketAvgPE;
     const peScore = Math.max(0, Math.min(100, 50 + deviation * 80));
-    metrics.push({ name: 'P/E', score: peScore, weight: 0.5 });
+    metrics.push({ name: 'P/E', score: peScore, weight: 0.35 });
+  }
+
+  // P/B ratio scoring (relative to market average of ~3)
+  if (pbRatio != null && pbRatio > 0) {
+    const marketAvgPB = 3;
+    const deviation = (marketAvgPB - pbRatio) / marketAvgPB;
+    const pbScore = Math.max(0, Math.min(100, 50 + deviation * 60));
+    metrics.push({ name: 'P/B', score: pbScore, weight: 0.25 });
   }
 
   // Dividend yield scoring (higher yield = more attractive)
   if (dividendYield != null && dividendYield > 0) {
     const yieldScore = Math.min(100, 40 + dividendYield * 2000); // 3% yield → 100
-    metrics.push({ name: 'Yield', score: yieldScore, weight: 0.5 });
+    metrics.push({ name: 'Yield', score: yieldScore, weight: 0.40 });
   }
 
   if (metrics.length === 0) {
@@ -471,11 +511,14 @@ export async function analyzeValuationETF(
     direction,
     reasoning: `ETF valuation: ${
       peRatio ? `P/E ${peRatio.toFixed(1)}` : ''
-    }${peRatio && dividendYield ? ', ' : ''}${
+    }${peRatio && pbRatio ? ', ' : ''}${
+      pbRatio ? `P/B ${pbRatio.toFixed(2)}` : ''
+    }${(peRatio || pbRatio) && dividendYield ? ', ' : ''}${
       dividendYield ? `Yield ${(dividendYield * 100).toFixed(2)}%` : ''
     }. ${direction === 'bullish' ? 'Attractive valuation.' : direction === 'bearish' ? 'Rich valuation.' : 'Fair valuation.'}`,
     breakdown: {
       peRatio: peRatio ?? null,
+      pbRatio: pbRatio ?? null,
       dividendYield: dividendYield ?? null,
       metricsCount: metrics.length,
       dataAvailable: true,
@@ -492,9 +535,9 @@ export interface ETFSignalWeightConfig {
 }
 
 export const ETF_SIGNAL_PIPELINE: ETFSignalWeightConfig[] = [
-  { source: 'macro_trend',    weight: 0.30, analyzer: analyzeMacroTrend },
+  { source: 'macro_trend',    weight: 0.35, analyzer: analyzeMacroTrend },
   { source: 'price_trend',    weight: 0.25, analyzer: analyzeSectorMomentum },
   { source: 'news_sentiment', weight: 0.20, analyzer: analyzeMarketSentiment },
-  { source: 'google_trends',  weight: 0.15, analyzer: analyzeSearchInterestETF },
+  { source: 'google_trends',  weight: 0.10, analyzer: analyzeSearchInterestETF },
   { source: 'pe_ratio',       weight: 0.10, analyzer: analyzeValuationETF },
 ];

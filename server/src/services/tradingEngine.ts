@@ -42,10 +42,53 @@ export interface TradeOrder {
   signalSnapshot: string; // JSON
 }
 
-// ─── Constants ──────────────────────────────────────────────────
+// ─── Asset-Type Thresholds ──────────────────────────────────────
 
-const SELL_CONFIDENCE_THRESHOLD = 0.40;
-const STOP_LOSS_PCT = -8;
+interface AssetThresholds {
+  stopLossPct: number;
+  sellConfidenceThreshold: number;
+  protectiveSellComposite: number;
+  minTradeConfidence: number;
+  maxPositionPct: number;
+  minHoldingDays: number;
+  // Conviction tier boundaries (confidence → multiplier)
+  convictionTiers: { min: number; multiplier: number; label: string }[];
+}
+
+const STOCK_THRESHOLDS: AssetThresholds = {
+  stopLossPct: -8,
+  sellConfidenceThreshold: 0.40,
+  protectiveSellComposite: -0.1,
+  minTradeConfidence: 0.55,
+  maxPositionPct: 0.15,
+  minHoldingDays: 0, // stocks can sell any time
+  convictionTiers: [
+    { min: 0.85, multiplier: 1.0,  label: 'full conviction' },
+    { min: 0.75, multiplier: 0.85, label: 'standard' },
+    { min: 0.65, multiplier: 0.65, label: 'medium' },
+    { min: 0.00, multiplier: 0.40, label: 'small (toe in the water)' },
+  ],
+};
+
+const ETF_THRESHOLDS: AssetThresholds = {
+  stopLossPct: -15,               // ETFs are diversified; wider stop-loss
+  sellConfidenceThreshold: 0.50,  // higher sell conviction required
+  protectiveSellComposite: -0.25, // stronger bearish signal needed for protective sell
+  minTradeConfidence: 0.60,       // higher bar to enter ETF positions
+  maxPositionPct: 0.20,           // larger positions OK — diversified by nature
+  minHoldingDays: 14,             // enforce minimum holding period
+  convictionTiers: [
+    { min: 0.85, multiplier: 1.0,  label: 'full conviction (ETF)' },
+    { min: 0.75, multiplier: 0.85, label: 'standard (ETF)' },
+    { min: 0.65, multiplier: 0.70, label: 'medium (ETF)' },
+    { min: 0.00, multiplier: 0.50, label: 'starter (ETF long-horizon)' },
+  ],
+};
+
+function getThresholds(assetType: string): AssetThresholds {
+  return assetType === 'etf' ? ETF_THRESHOLDS : STOCK_THRESHOLDS;
+}
+
 const MIN_CASH_RESERVE_PCT = 0.10;
 const STARTING_CAPITAL = 100_000;
 
@@ -150,40 +193,43 @@ function scoreToRecommendation(
 }
 
 /**
- * Decision logic: should we buy this stock?
- * Only buy when confidence > 55%, respecting position limits.
+ * Decision logic: should we buy this stock/ETF?
+ * Uses asset-type-aware thresholds — ETFs have higher confidence bars
+ * but allow larger positions (diversified instruments).
  */
 export function shouldBuy(
   symbol: string,
   evaluation: EvaluationResult,
-  currentPrice: number
+  currentPrice: number,
+  assetType: string = 'stock'
 ): TradeDecision {
   const db = getDb();
   const config = DEFAULT_SCHEDULER_CONFIG;
+  const thresholds = getThresholds(assetType);
+  const tag = assetType === 'etf' ? '[ETF]' : '[Stock]';
 
-  // Check confidence threshold
-  if (evaluation.confidence < config.minTradeConfidence) {
+  // Check confidence threshold (ETFs: 60%, stocks: 55%)
+  if (evaluation.confidence < thresholds.minTradeConfidence) {
     return {
       shouldTrade: false, action: 'buy', quantity: 0,
-      reason: `Confidence ${(evaluation.confidence * 100).toFixed(1)}% below threshold ${config.minTradeConfidence * 100}%`,
+      reason: `${tag} Confidence ${(evaluation.confidence * 100).toFixed(1)}% below ${assetType} threshold ${thresholds.minTradeConfidence * 100}%`,
     };
   }
 
   // Must be a buy/strong_buy recommendation, OR a hold with bullish lean + high confidence
-  // (relaxation: if composite score shows bullish lean and confidence is high, treat as soft buy)
   const isBuyOrStrongBuy = evaluation.recommendation === 'buy' || evaluation.recommendation === 'strong_buy';
   const isSoftBuy = evaluation.recommendation === 'hold' && 
                     evaluation.compositeScore > 0.15 && 
-                    evaluation.confidence >= config.minTradeConfidence + 0.05;
+                    evaluation.confidence >= thresholds.minTradeConfidence + 0.05;
 
   if (!isBuyOrStrongBuy && !isSoftBuy) {
     return {
       shouldTrade: false, action: 'buy', quantity: 0,
-      reason: `Recommendation is ${evaluation.recommendation}, not a buy signal (composite: ${evaluation.compositeScore.toFixed(3)})`,
+      reason: `${tag} Recommendation is ${evaluation.recommendation}, not a buy signal (composite: ${evaluation.compositeScore.toFixed(3)})`,
     };
   }
 
-  // Check if we already hold this stock
+  // Check if we already hold this asset
   const existingPos = db.prepare(
     "SELECT pp.quantity FROM portfolio_positions pp JOIN stocks s ON s.id = pp.stock_id WHERE s.symbol = ? AND pp.quantity > 0"
   ).get(symbol) as any;
@@ -205,9 +251,9 @@ export function shouldBuy(
     };
   }
 
-  // Calculate position size
+  // Calculate position size — ETFs get larger max allocation (20% vs 15%)
   const totalValue = getPortfolioValue();
-  const maxPositionValue = totalValue * config.maxPositionPct;
+  const maxPositionValue = totalValue * thresholds.maxPositionPct;
   const cashBalance = getCashBalance();
   const minCashReserve = totalValue * MIN_CASH_RESERVE_PCT;
   const availableCash = Math.max(0, cashBalance - minCashReserve);
@@ -219,26 +265,16 @@ export function shouldBuy(
     };
   }
 
-  // Tiered position sizing based on confidence level
-  // 55-65%: Small position (40% of max) — "toe in the water"
-  // 65-75%: Medium position (65% of max)
-  // 75-85%: Standard position (85% of max)
-  // 85%+:   Full conviction (100% of max)
-  let convictionMultiplier: number;
-  let sizeLabel: string;
-  
-  if (evaluation.confidence >= 0.85) {
-    convictionMultiplier = 1.0;
-    sizeLabel = 'full conviction';
-  } else if (evaluation.confidence >= 0.75) {
-    convictionMultiplier = 0.85;
-    sizeLabel = 'standard';
-  } else if (evaluation.confidence >= 0.65) {
-    convictionMultiplier = 0.65;
-    sizeLabel = 'medium';
-  } else {
-    convictionMultiplier = 0.40;
-    sizeLabel = 'small (toe in the water)';
+  // Tiered position sizing using asset-type-specific conviction tiers
+  let convictionMultiplier = thresholds.convictionTiers[thresholds.convictionTiers.length - 1].multiplier;
+  let sizeLabel = thresholds.convictionTiers[thresholds.convictionTiers.length - 1].label;
+
+  for (const tier of thresholds.convictionTiers) {
+    if (evaluation.confidence >= tier.min) {
+      convictionMultiplier = tier.multiplier;
+      sizeLabel = tier.label;
+      break;
+    }
   }
 
   const targetValue = Math.min(maxPositionValue * convictionMultiplier, availableCash);
@@ -255,20 +291,24 @@ export function shouldBuy(
     shouldTrade: true,
     action: 'buy',
     quantity,
-    reason: `Buy signal: confidence ${(evaluation.confidence * 100).toFixed(1)}%, ${evaluation.recommendation}. ${sizeLabel} position: ${quantity} shares @ $${currentPrice.toFixed(2)} = $${(quantity * currentPrice).toFixed(2)}`,
+    reason: `${tag} Buy signal: confidence ${(evaluation.confidence * 100).toFixed(1)}%, ${evaluation.recommendation}. ${sizeLabel} position: ${quantity} shares @ $${currentPrice.toFixed(2)} = $${(quantity * currentPrice).toFixed(2)} (maxPos=${(thresholds.maxPositionPct * 100).toFixed(0)}%)`,
   };
 }
 
 /**
  * Decision logic: should we sell a held position?
- * Sell when confidence drops below threshold or stop-loss hit.
+ * ETFs use wider stop-loss, minimum holding period, and require
+ * stronger bearish conviction before selling.
  */
 export function shouldSell(
   symbol: string,
   evaluation: EvaluationResult,
-  currentPrice: number
+  currentPrice: number,
+  assetType: string = 'stock'
 ): TradeDecision {
   const db = getDb();
+  const thresholds = getThresholds(assetType);
+  const tag = assetType === 'etf' ? '[ETF]' : '[Stock]';
 
   const position = db.prepare(`
     SELECT pp.*, s.symbol FROM portfolio_positions pp
@@ -287,34 +327,53 @@ export function shouldSell(
     ? ((currentPrice - position.average_cost) / position.average_cost) * 100
     : 0;
 
-  // Stop-loss check (–8%)
-  if (pnlPct <= STOP_LOSS_PCT) {
+  // Minimum holding period check (ETFs: 14 days, stocks: 0)
+  if (thresholds.minHoldingDays > 0 && position.opened_at) {
+    const openedAt = new Date(position.opened_at);
+    const now = new Date();
+    const daysHeld = (now.getTime() - openedAt.getTime()) / (1000 * 60 * 60 * 24);
+    if (daysHeld < thresholds.minHoldingDays) {
+      // Only override if NOT a catastrophic stop-loss (use 2x the normal stop-loss as emergency exit)
+      const emergencyStopLoss = thresholds.stopLossPct * 2; // e.g., -30% for ETFs
+      if (pnlPct > emergencyStopLoss) {
+        return {
+          shouldTrade: false, action: 'sell', quantity: 0,
+          reason: `${tag} Minimum holding period: ${daysHeld.toFixed(0)}/${thresholds.minHoldingDays} days. P&L ${pnlPct.toFixed(2)}% within tolerance. Holding.`,
+        };
+      }
+      // If past emergency stop-loss, fall through and sell anyway
+      console.log(`[TradingEngine] ${tag} ${symbol}: Emergency stop-loss override — ${pnlPct.toFixed(2)}% loss exceeds ${emergencyStopLoss}% during holding period`);
+    }
+  }
+
+  // Stop-loss check (ETFs: -15%, stocks: -8%)
+  if (pnlPct <= thresholds.stopLossPct) {
     return {
       shouldTrade: true,
       action: 'sell',
       quantity: position.quantity,
-      reason: `STOP-LOSS triggered: P&L ${pnlPct.toFixed(2)}% exceeds –${Math.abs(STOP_LOSS_PCT)}% threshold`,
+      reason: `${tag} STOP-LOSS triggered: P&L ${pnlPct.toFixed(2)}% exceeds ${thresholds.stopLossPct}% threshold`,
     };
   }
 
-  // Confidence-based sell: if confidence drops below sell threshold
-  if (evaluation.confidence >= SELL_CONFIDENCE_THRESHOLD &&
+  // Confidence-based sell (ETFs need 50%+ confidence, stocks 40%+)
+  if (evaluation.confidence >= thresholds.sellConfidenceThreshold &&
       (evaluation.recommendation === 'sell' || evaluation.recommendation === 'strong_sell')) {
     return {
       shouldTrade: true,
       action: 'sell',
       quantity: position.quantity,
-      reason: `Sell signal: ${evaluation.recommendation} with ${(evaluation.confidence * 100).toFixed(1)}% confidence. P&L: ${pnlPct.toFixed(2)}%`,
+      reason: `${tag} Sell signal: ${evaluation.recommendation} with ${(evaluation.confidence * 100).toFixed(1)}% confidence (threshold: ${(thresholds.sellConfidenceThreshold * 100).toFixed(0)}%). P&L: ${pnlPct.toFixed(2)}%`,
     };
   }
 
-  // Very low confidence on a bearish lean — sell as a protective measure
-  if (evaluation.compositeScore < -0.1 && evaluation.confidence < SELL_CONFIDENCE_THRESHOLD) {
+  // Protective sell on bearish lean (ETFs: composite < -0.25, stocks: < -0.1)
+  if (evaluation.compositeScore < thresholds.protectiveSellComposite && evaluation.confidence < thresholds.sellConfidenceThreshold) {
     return {
       shouldTrade: true,
       action: 'sell',
       quantity: position.quantity,
-      reason: `Protective sell: bearish lean (score ${evaluation.compositeScore.toFixed(3)}) with low confidence. Reducing risk.`,
+      reason: `${tag} Protective sell: bearish lean (score ${evaluation.compositeScore.toFixed(3)}, threshold ${thresholds.protectiveSellComposite}) with low confidence. Reducing risk.`,
     };
   }
 
@@ -322,7 +381,7 @@ export function shouldSell(
     shouldTrade: false,
     action: 'sell',
     quantity: 0,
-    reason: `Holding ${symbol}: P&L ${pnlPct.toFixed(2)}%, no sell trigger`,
+    reason: `${tag} Holding ${symbol}: P&L ${pnlPct.toFixed(2)}%, no sell trigger (stopLoss=${thresholds.stopLossPct}%, minHold=${thresholds.minHoldingDays}d)`,
   };
 }
 

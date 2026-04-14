@@ -102,3 +102,25 @@
 
 **TypeScript:** Build passes with `npm run build`. Pre-existing errors in reactiveNewsMonitor.ts are unrelated.
 
+### 2026-04-15 — ETF Longer-Horizon Tuning
+
+**User directive:** ETFs need genuinely longer-term analysis — not the same treatment as stocks.
+
+**Changes to `server/src/services/signals/etfSignals.ts`:**
+
+1. **Macro Trend Signal:** Half-life extended from 7→18 days. Added 14 new macro keywords covering energy policy, central bank stance, housing, supply chain, commodities, emerging markets, AI investment, defense spending. Minimum weight floor raised from 0.15→0.25 so older macro articles retain influence.
+
+2. **Sector Momentum Signal:** Lookback extended from 20/60 days to 40/120 days. Added 200-day long-term trend comparison with dedicated score component. Momentum bonus capped at ±8 (was ±15) — ETFs should be patient with short-term dips. Volatility penalty reduced (multiplier 6 vs 10). Full confidence now at 200 data points (was 120).
+
+3. **Market Sentiment Signal:** Half-life extended from 3→7 days. Weight floor raised from 0.12→0.20. Added consensus boost mechanism: when >70% of articles agree on direction, the signal gets amplified proportionally.
+
+4. **Search Interest (ETF):** Rising interest base score raised from 55→58. Contrarian penalty reduced from -5 to -3 and only triggers above 90 (was 85). Stable high-interest score formula improved — sustained interest weighted more positively.
+
+5. **Valuation (ETF):** Added P/B ratio scoring (weight 0.25) alongside P/E (0.35) and yield (0.40). Breakdown now reports P/B in reasoning and data.
+
+6. **Pipeline Weights:** Macro raised from 30%→35%, search interest lowered from 15%→10%. Other weights unchanged. Total sums to 100%.
+
+**ETF routing verified:** `analyzeAsset()` in `index.ts` correctly dispatches to `analyzeETF()` when `stock.assetType === 'etf'`.
+
+**TypeScript:** `npx tsc --noEmit` passes cleanly.
+

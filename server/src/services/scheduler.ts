@@ -562,7 +562,7 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
         };
 
         // 4) Check if we should buy or sell
-        const buyDecision = shouldBuy(stock.symbol, evaluation, quote.price);
+        const buyDecision = shouldBuy(stock.symbol, evaluation, quote.price, assetType);
         if (buyDecision.shouldTrade) {
           executeTrade({
             stockId: stock.id,
@@ -581,7 +581,7 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
           }, 1);
         }
 
-        const sellDecision = shouldSell(stock.symbol, evaluation, quote.price);
+        const sellDecision = shouldSell(stock.symbol, evaluation, quote.price, assetType);
         if (sellDecision.shouldTrade) {
           executeTrade({
             stockId: stock.id,
