@@ -636,3 +636,344 @@ Added Alpha Vantage REST API as a supplementary data source for company fundamen
 - **Ellie (Frontend):** `/api/status` now includes `alpha_vantage` in the apis object. No UI changes required unless she wants to display it.
 - **Wu (Tests):** New service has no tests yet. May want to add unit tests for the rate limiter and cache behavior.
 
+---
+
+# Decision: ETF-Specific Signal Analysis Architecture
+
+**Author:** Malcolm (Data Engineer)  
+**Date:** 2026-04-14  
+**Status:** Implemented  
+**Requested by:** Jan G.
+
+## Context
+
+The original signal pipeline was designed for individual stocks with weights optimized for company-level analysis:
+- Valuation (P/E, P/B) 35%
+- Price Trend 25%
+- Sentiment 20%
+- Search Interest 20%
+
+This approach doesn't work well for ETFs because:
+1. ETF P/E ratios are less meaningful than for individual companies
+2. ETFs are driven by macro trends, not company-specific events
+3. Sector composition and rotation matter more than individual fundamentals
+4. Investment horizon is typically longer (weeks/months vs days)
+5. Geopolitical and economic trends have outsized impact
+
+## Decision
+
+Created a separate ETF analysis pipeline with fundamentally different signal weights and logic:
+
+### ETF Signal Weights
+| Signal | Weight | Focus |
+|--------|--------|-------|
+| Macro Trend | 30% | Interest rates, inflation, trade policy, geopolitical events |
+| Sector Momentum | 25% | Price trend analysis, sector rotation detection |
+| Market Sentiment | 20% | Broad market mood from news (vs company-specific) |
+| Search Interest | 15% | Sustained interest patterns (vs daily spikes) |
+| Valuation | 10% | Basic P/E and yield (lower weight) |
+
+### Implementation Details
+
+**1. Signal Modules (`server/src/services/signals/etfSignals.ts`)**
+- **Macro Trend:** Keyword analysis on news for macro themes + Finnhub sentiment. 7-day half-life (vs 24hr for stocks).
+- **Sector Momentum:** 20-day vs 60-day return comparison, momentum acceleration detection. Future: sector benchmark comparison.
+- **Market Sentiment:** 3-day half-life news sentiment with consensus measurement. Broader focus than company-specific.
+- **Search Interest:** Less contrarian penalty for high sustained interest (normal for popular ETFs).
+- **Valuation:** P/E vs market average (20) and dividend yield. Confidence capped at 0.7 (vs 0.85 for stocks).
+
+**2. Signal Routing (`server/src/services/signals/index.ts`)**
+- Added `analyzeAsset(stock, marketData)` dispatcher
+- Routes to `analyzeETF()` or `analyzeStock()` based on `stock.assetType`
+- Both return same `AggregateSignalResult` interface for pipeline consistency
+
+**3. LLM Reasoning (`server/src/services/llm/reasoningEngine.ts`)**
+- Created `SYSTEM_PROMPT_ETF` emphasizing:
+  - Macro-economic outlook and geopolitical context
+  - Sector rotation and momentum
+  - Longer investment horizon
+  - ETF composition and concentration risk
+- `analyzeWithReasoning()` now accepts `assetType` parameter
+- Routes to ETF or stock prompt automatically
+
+**4. Pipeline Integration (`server/src/services/scheduler.ts`)**
+- Uses `analyzeAsset()` dispatcher — automatic routing based on `assetType`
+- LLM reasoning receives correct asset type
+- No code changes needed for future ETF additions
+
+## Rationale
+
+**Why separate pipelines instead of unified?**
+- ETFs and stocks are fundamentally different asset types with different drivers
+- Attempting to unify would dilute signal quality for both
+- Separate pipelines allow each to evolve independently
+- Learning engine can tune weights separately per asset type
+
+**Why these specific weights?**
+- Macro Trend (30%): ETFs are macro bets — interest rates, inflation, geopolitical events drive returns
+- Sector Momentum (25%): Sector rotation is key — outperformance comes from being in the right sector at the right time
+- Market Sentiment (20%): Broad market mood matters more than individual company news
+- Search Interest (15%): Lower weight than stocks — sustained interest is normal for popular ETFs
+- Valuation (10%): ETF P/E is aggregate of holdings, less actionable than stock P/E
+
+**Why longer time horizons?**
+- ETFs are typically held longer than individual stocks
+- Macro trends play out over weeks/months, not days
+- Reduces noise from daily volatility
+- News sentiment uses 3-7 day half-life vs 24hr for stocks
+
+## Consequences
+
+**Benefits:**
+- ETFs get analysis optimized for their characteristics
+- Better signal quality for both stocks and ETFs
+- Explicit separation makes code easier to understand and maintain
+- Future: can add more asset types (crypto, commodities) with same pattern
+
+**Trade-offs:**
+- More code to maintain (2 pipelines vs 1)
+- Learning engine needs to track weights separately per asset type
+- Team needs to understand when to use each pipeline
+
+**Migration:**
+- Existing stocks unaffected — continue using stock pipeline
+- New ETFs automatically routed to ETF pipeline via `assetType` field
+- No database schema changes needed
+
+## Validation
+
+- Build succeeds with no TypeScript errors
+- All 82 existing tests pass (signal aggregation, trading engine, API)
+- Graceful degradation: missing data → neutral score, low confidence
+- LLM prompting tested with both asset types
+
+## Future Enhancements
+
+1. **Sector Benchmark Comparison:** Compare ETF momentum vs sector index (e.g., XLF vs financials index)
+2. **Correlation Analysis:** Measure ETF correlation with market indices (SPY, QQQ) for diversification scoring
+3. **Holdings Analysis:** Parse ETF top holdings and weight signals by concentration
+4. **Macro Indicator Integration:** Direct macro data feeds (Fed rate decisions, GDP, CPI) vs news proxy
+5. **Geographic Risk Scoring:** For international ETFs, add country/region risk analysis
+
+## Notes
+
+- All signals use same 0-100 score range and SignalResult interface
+- DB storage still uses -1..+1 compositeScore: `(score - 50) / 50`
+- Custom weights from learning engine work for both stocks and ETFs
+- Scheduler automatically routes based on `stock.assetType` field
+
+---
+
+# Decision: ETF-Specific Analysis Pipeline Backend Wiring
+
+**Author:** Muldoon (Backend Dev)  
+**Date:** 2026-04-16  
+**Status:** Implemented  
+**Requested by:** Jan G.
+
+## Context
+The analysis pipeline previously treated all assets (stocks and ETFs) the same way, using stock-specific signals. Malcolm is creating ETF-specific analysis logic in `etfSignals.ts` that handles ETF fundamentals differently. The backend needs to route assets to the appropriate analyzer based on `asset_type`.
+
+## Changes
+
+### 1. Scheduler Analysis Routing (`scheduler.ts`)
+- **Added dynamic routing**: When analyzing an asset, check `stock.asset_type` (from DB column)
+- **ETF path**: If `asset_type === 'etf'` AND `analyzeETF` is available, call the ETF analyzer
+- **Stock path**: Otherwise, use the existing `analyzeStock()` analyzer
+- **Graceful degradation**: If ETF signals aren't ready yet, fall back to stock analysis with a warning log
+- **Logging**: Added verbose activity logging to show which pipeline was selected: `"[Scheduler] ${symbol}: Using ETF analysis pipeline"` vs stock pipeline
+
+### 2. Reasoning Engine Integration (`reasoningEngine.ts`)
+- **New parameter**: `analyzeWithReasoning()` now accepts `assetType: string = 'stock'` (6th parameter)
+- **Prompt context**: LLM prompt now displays "ETF: SPY" vs "Stock: AAPL" based on asset type
+- **ETF-aware prompts**: Malcolm is updating the LLM system prompt to handle ETF-specific reasoning
+
+### 3. API Type Filtering (`api.ts`)
+- **Watchlist filtering**: `GET /api/watchlist?type=stock` or `?type=etf` now supported
+- **Query parameter**: Optional `type` param filters results by `asset_type` column
+- **WHERE clause**: Added `AND s.asset_type = ?` when type is provided
+- **Response**: Already includes `asset_type` column from DB (no schema changes needed)
+
+### 4. ETF Signals Import (Stub)
+- **Dynamic import**: Try-catch wrapper attempts to load `./signals/etfSignals.ts`
+- **Fallback**: If Malcolm hasn't created the file yet, `analyzeETF` is `null` and scheduler falls back
+- **Function signature**: Malcolm's `analyzeETF(marketData: MarketData): Promise<AggregateSignalResult>` matches `analyzeStock` interface
+
+## Key Design Decisions
+
+### Asset Type Propagation
+- Asset type flows from DB → scheduler → analyzer → reasoning engine → logs
+- No hardcoded assumptions — all asset-specific logic gates on runtime checks
+
+### Backward Compatibility
+- Stock analysis continues unchanged
+- ETFs can use stock analysis until Malcolm's ETF signals are ready
+- No breaking changes to existing API contracts or DB schema
+
+### Logging Verbosity
+- Asset type logged at verbosity level 3 (normal) for pipeline decision visibility
+- ETF fallback warning at verbosity level 3 for operator awareness
+- Full signal breakdown already at level 4/5 (unchanged)
+
+## Files Modified
+1. `server/src/services/scheduler.ts` — routing logic, ETF import stub, asset_type parameter flow
+2. `server/src/services/llm/reasoningEngine.ts` — added assetType parameter, updated prompts
+3. `server/src/routes/api.ts` — added type filtering to watchlist endpoint
+
+## Testing Notes
+- TypeScript compilation: ✅ Clean (`tsc --noEmit`)
+- Backward compatibility: Stock analysis unchanged
+- ETF routing: Will activate when Malcolm creates `etfSignals.ts`
+- API filtering: Can test with `curl http://localhost:3001/api/watchlist?type=etf`
+
+## Next Steps
+1. Malcolm creates `server/src/services/signals/etfSignals.ts` with `analyzeETF()` function
+2. Malcolm updates LLM system prompt in `reasoningEngine.ts` with ETF-specific guidance
+3. Ellie can add "Stock" / "ETF" filter toggle to the Analysis page
+4. Wu may want integration tests for ETF routing logic
+
+## Team Impact
+- **Malcolm**: Can now create ETF signals independently without touching scheduler
+- **Ellie**: API supports type filtering for frontend asset type toggles
+- **Grant**: Architecture supports multi-asset-type expansion (bonds, commodities, etc.)
+
+---
+
+# Decision: Discovery Page ETF/Stock Separation
+
+**Date:** 2026-04-17  
+**Author:** Ellie (Frontend Dev)  
+**Status:** Implemented  
+**Scope:** Discovery page UX/UI
+
+## Context
+
+The Discovery page was showing all assets (stocks + ETFs) in a single unified table. While functional, this made it difficult to distinguish ETFs from stocks at a glance, especially as the watchlist grows.
+
+## Decision
+
+Implemented a **tab-based layout** to separate stocks and ETFs into distinct views:
+
+### What We Built
+
+1. **Tab Switcher:**
+   - Two tabs: "📈 Stocks (N)" and "📊 ETFs (N)" with live counts
+   - Active tab gets cyan bottom border + tertiary background
+   - Smooth hover transitions for inactive tabs
+   - Tabs positioned at top of watchlist card, above the table
+
+2. **Client-Side Filtering:**
+   - Filter by `asset_type` field (already in DB, returned by `/api/watchlist`)
+   - `stocks = watchlist.filter(s => s.asset_type !== 'etf')`
+   - `etfs = watchlist.filter(s => s.asset_type === 'etf')`
+   - No backend changes required
+
+3. **ETF Table Enhancements:**
+   - Added "Type" column showing orange "ETF" badge
+   - Same columns as stock table (Price, P/E, P/B, 52w High/Low, etc.)
+   - P/E and P/B less important for ETFs but kept for consistency
+
+4. **Add Stock Form Integration:**
+   - Asset type selector syncs with active tab via `useEffect`
+   - On Stocks tab → defaults to "stock"
+   - On ETFs tab → defaults to "etf"
+   - User can manually override if needed
+
+5. **Recently Discovered Section:**
+   - Added "Type" badge column (cyan for stocks, orange for ETFs)
+   - Shows all recent discoveries regardless of active tab
+
+### Why This Approach
+
+**Considered Alternatives:**
+
+- **Option A: Two separate tables side-by-side**  
+  ❌ Too cluttered on smaller screens, harder to scan
+
+- **Option B: Toggle switch instead of tabs**  
+  ❌ Less obvious, no counts visible, doesn't scale if we add more asset types later
+
+- **✅ Option C: Tab-based (CHOSEN)**  
+  - Clean separation, obvious navigation
+  - Counts visible at all times (helps user understand portfolio composition)
+  - Scales well if we add bonds, crypto, or other asset types later
+  - Matches common UI patterns (users understand tabs)
+
+**Why Client-Side Filtering:**
+
+The backend already returns `asset_type` for every stock. Filtering client-side keeps the page snappy (no extra API calls), simplifies state management, and requires zero backend changes. If the watchlist grows to thousands of items, we can optimize later with backend pagination + filtering.
+
+## Impact
+
+### User Experience
+- ✅ **Clarity:** ETFs are now visually distinct from stocks
+- ✅ **Speed:** Instant tab switching (no API calls)
+- ✅ **Context:** Live counts show portfolio composition at a glance
+- ✅ **Convenience:** Add form defaults to the right asset type
+
+### Technical
+- ✅ **Zero backend changes** — uses existing `asset_type` field
+- ✅ **No new dependencies** — pure React state + memo
+- ✅ **TypeScript safe** — compiles clean with strict mode
+- ✅ **Hot-reload friendly** — Vite dev server works perfectly
+
+### Future-Proof
+- Can easily add more tabs (Bonds, Crypto, Options, etc.) if needed
+- Backend can paginate/filter by `asset_type` later for performance
+- Tab counts provide analytics insight (e.g., "70% stocks, 30% ETFs")
+
+## Implementation Details
+
+**Files Modified:**
+- `client/src/pages/Discovery.tsx` (~600 lines)
+
+**Key State:**
+```typescript
+const [activeTab, setActiveTab] = useState<TabType>('stocks');
+
+const stocks = useMemo(() => 
+  allStocks.filter((s: any) => (s.asset_type ?? s.assetType) !== 'etf'),
+  [allStocks]
+);
+
+const etfs = useMemo(() => 
+  allStocks.filter((s: any) => (s.asset_type ?? s.assetType) === 'etf'),
+  [allStocks]
+);
+
+const displayedItems = activeTab === 'stocks' ? stocks : etfs;
+```
+
+**Styling:**
+- Active tab: `border-bottom: 2px solid #00d4ff` (cyan accent)
+- ETF badge: `background: #f0883e15, color: #f0883e` (orange)
+- Stock badge: `background: #00d4ff15, color: #00d4ff` (cyan)
+
+**Compatibility:**
+- Handles both `asset_type` (snake_case) and `assetType` (camelCase) from backend
+- Graceful fallback to 'stock' if field is missing
+
+## Team Coordination
+
+**No blockers for:**
+- Muldoon (Backend) — no API changes needed
+- Malcolm (AI Logic) — no analysis changes needed
+- Wu (Testing) — existing tests should pass, may want to add tab-switching test
+
+**Notify:**
+- Jan G. — new UX is ready for user testing
+- Grant (Infra) — no deployment changes needed
+
+## Rollback Plan
+
+If tabs cause issues, revert to single table view:
+1. Set `displayedItems = allStocks` (no filtering)
+2. Remove tab switcher UI
+3. Add "Type" column to main table instead
+
+Code is clean and modular — rollback would be <10 lines.
+
+---
+
+**Confidence:** High — build passes, dev server runs, no TypeScript errors, follows existing patterns.
+
