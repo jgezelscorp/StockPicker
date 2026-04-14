@@ -1,8 +1,9 @@
-import type { Stock, SignalSource, SignalDirection } from '../../types';
+import type { Stock, SignalSource, SignalDirection, AssetType } from '../../types';
 import { analyzeValuation } from './valuationSignal';
 import { analyzeTrend } from './trendSignal';
 import { analyzeSentiment } from './sentimentSignal';
 import { analyzeSearchInterest } from './searchInterestSignal';
+import { ETF_SIGNAL_PIPELINE } from './etfSignals';
 
 // ─── Signal interfaces ────────────────────────────────────────────
 
@@ -248,7 +249,102 @@ export async function analyzeStock(
   };
 }
 
+/**
+ * Main entry point for signal analysis.
+ * Routes to stock or ETF analyzer based on asset_type.
+ */
+export async function analyzeAsset(
+  stock: Stock,
+  marketData: MarketData,
+  customWeights?: { source: SignalSource; weight: number }[],
+): Promise<AggregateSignalResult> {
+  if (stock.assetType === 'etf') {
+    return analyzeETF(stock, marketData, customWeights);
+  }
+  return analyzeStock(stock, marketData, customWeights);
+}
+
+/**
+ * Analyze an ETF with ETF-specific signal weights and logic.
+ * 
+ * ETF weights: macro_trend 30%, sector_momentum 25%, market_sentiment 20%,
+ * search_interest 15%, valuation 10%
+ */
+export async function analyzeETF(
+  stock: Stock,
+  marketData: MarketData,
+  customWeights?: { source: SignalSource; weight: number }[],
+): Promise<AggregateSignalResult> {
+  // Apply custom weights if provided (from learning engine adjustments)
+  const pipeline = customWeights
+    ? ETF_SIGNAL_PIPELINE.map(p => ({
+        ...p,
+        weight: customWeights.find(w => w.source === p.source)?.weight ?? p.weight,
+      }))
+    : ETF_SIGNAL_PIPELINE;
+
+  // Normalise weights to sum to 1
+  const totalWeight = pipeline.reduce((s, p) => s + p.weight, 0);
+  const normalised = pipeline.map(p => ({ ...p, weight: p.weight / totalWeight }));
+
+  // Run all signal analysers in parallel
+  const signalPromises = normalised.map(async (config) => {
+    try {
+      return await config.analyzer(stock, marketData);
+    } catch (err: any) {
+      console.error(`[ETF Signals] ${config.source} failed for ${stock.symbol}:`, err.message);
+      return {
+        source: config.source,
+        score: 50,
+        confidence: 0.1,
+        direction: 'neutral' as const,
+        reasoning: `ETF signal analysis failed: ${err.message}`,
+        breakdown: { error: err.message },
+      };
+    }
+  });
+
+  const signals = await Promise.all(signalPromises);
+
+  // Calculate weighted composite score (0–100)
+  const weightedBreakdown = normalised.map((config, i) => ({
+    source: config.source,
+    weight: Math.round(config.weight * 100) / 100,
+    score: signals[i].score,
+    weightedScore: Math.round(signals[i].score * config.weight * 100) / 100,
+    direction: signals[i].direction,
+  }));
+
+  const overallScore = Math.max(0, Math.min(100, Math.round(
+    weightedBreakdown.reduce((s, wb) => s + wb.weightedScore, 0),
+  )));
+
+  // Map 0–100 to -1..+1 for DB compatibility
+  const compositeScore = Math.round(((overallScore - 50) / 50) * 100) / 100;
+
+  const overallConfidence = calculateAgreementConfidence(signals);
+  const recommendation = scoreToRecommendation(overallScore);
+
+  const direction = overallScore >= 60 ? 'bullish' as const
+    : overallScore <= 40 ? 'bearish' as const
+    : 'neutral' as const;
+
+  const rationale = buildRationale(signals, overallScore, recommendation);
+
+  return {
+    overallScore,
+    overallConfidence,
+    direction,
+    recommendation,
+    compositeScore,
+    signals,
+    rationale,
+    weightedBreakdown,
+  };
+}
+
 export { analyzeValuation } from './valuationSignal';
 export { analyzeTrend } from './trendSignal';
 export { analyzeSentiment } from './sentimentSignal';
 export { analyzeSearchInterest } from './searchInterestSignal';
+export * from './etfSignals';

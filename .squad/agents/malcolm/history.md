@@ -28,3 +28,16 @@
 - **Search interest signal rewritten:** Removed all mock/stub functions. Consumes `marketData.searchTrend` from Google Trends. Added contrarian element: very high interest (>80) dampens bullish score. Peak attention + falling = extra bearish. Magnitude-scaled scoring (±0.6 per percent change, capped ±30).
 - **Trend signal minor fix:** Improved partial-data handling — when 50–199 days of history available, SMA50 still produces meaningful momentum signal instead of defaulting to neutral.
 - All signals handle missing data gracefully: score 50, confidence 0.1, direction neutral. Never throw.
+
+### 2026-04-14 — ETF-Specific Signal Analysis
+- **Created `server/src/services/signals/etfSignals.ts`:** New module with ETF-specific analysis using fundamentally different weights and logic vs stocks.
+- **ETF signal weights:** macro_trend 30%, sector_momentum 25%, market_sentiment 20%, search_interest 15%, valuation 10% — reflects longer-term macro focus vs individual company metrics.
+- **Macro trend signal:** Analyzes news for macro themes (interest rates, inflation, trade policy, geopolitical events) using keyword analysis + Finnhub sentiment. Longer 7-day half-life vs 24hr for stocks. Produces 0-100 score based on macro sentiment balance.
+- **Sector momentum signal:** Uses price trend analysis (20-day vs 60-day returns) to detect sector rotation and momentum acceleration. Higher confidence with more data and lower volatility. Future enhancement: compare with sector benchmark indices.
+- **Market sentiment signal:** Broader market mood from news (3-day half-life vs 24hr for stocks). Measures consensus across articles. Less focused on company-specific events.
+- **Search interest signal (ETF-adapted):** Favors sustained interest over short-term spikes. Less contrarian penalty than stocks — sustained high interest is normal for popular ETFs.
+- **Valuation signal (ETF-adapted):** Lower weight (10% vs 35% for stocks). P/E less meaningful for ETFs. Focus on P/E vs market avg and dividend yield. Confidence capped at 0.7 vs 0.85 for stocks.
+- **Updated `server/src/services/signals/index.ts`:** Added `analyzeETF()` and `analyzeAsset()` dispatcher. Routes to ETF or stock analyzer based on `asset_type`. All use same `SignalResult` and `AggregateSignalResult` interfaces for consistency.
+- **Updated `server/src/services/llm/reasoningEngine.ts`:** Added ETF-specific system prompt (`SYSTEM_PROMPT_ETF`) emphasizing macro outlook, geopolitical risks, sector rotation, longer investment horizon (weeks/months), and ETF composition considerations. Stock prompt kept as `SYSTEM_PROMPT_STOCK`. `analyzeWithReasoning()` now accepts `assetType` parameter and routes to appropriate prompt.
+- **Updated `server/src/services/scheduler.ts`:** Integrated `analyzeAsset()` dispatcher — automatically routes ETFs to ETF analyzer, stocks to stock analyzer. Removed old stub code. LLM reasoning already passing `assetType`.
+- **All tests pass:** 82 tests including signal aggregation, trading engine, and API endpoints. Build succeeds with no TypeScript errors.

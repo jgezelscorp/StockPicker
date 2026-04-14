@@ -11,7 +11,7 @@ import {
   type SignalInput,
 } from './tradingEngine';
 import { takeSnapshot as takePortfolioSnapshotFromTracker } from './portfolioTracker';
-import { analyzeStock, type MarketData } from './signals';
+import { analyzeAsset, analyzeStock, analyzeETF, type MarketData, type AggregateSignalResult } from './signals';
 import { evaluatePastDecisions, adjustWeights, getCurrentWeights } from './learningEngine';
 import { fetchCompanyNews } from './apis/finnhub';
 import { fetchSearchTrend } from './apis/googleTrends';
@@ -239,7 +239,8 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
 
     for (const stock of stocks) {
       try {
-        logActivity('info', 'signal', 'Collecting signals...', stock.symbol, undefined, 3);
+        const assetType = stock.asset_type || 'stock'; // Default to 'stock' if not set
+        logActivity('info', 'signal', 'Collecting signals...', stock.symbol, { assetType }, 3);
 
         // 1) Fetch market data for the signal pipeline
         const fetchStartHistory = Date.now();
@@ -362,7 +363,10 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
             weight,
           }));
 
-        const aggregate = await analyzeStock(stock, marketData, weightEntries);
+        // Use unified analyzeAsset function - routes to ETF or stock analysis based on asset_type
+        let aggregate: AggregateSignalResult;
+        logActivity('info', 'pipeline', `${stock.symbol}: Using ${assetType} analysis pipeline`, stock.symbol, { assetType }, 3);
+        aggregate = await analyzeAsset(stock, marketData, weightEntries);
         result.signalsCaptured += aggregate.signals.length;
 
         logActivity('info', 'signal', 'Signal analysis complete', stock.symbol, {
@@ -402,7 +406,7 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
         const llmStart = Date.now();
         const reasoning = await analyzeWithReasoning(
           stock.symbol, stock.name || stock.symbol, stock.market,
-          aggregate, marketData,
+          aggregate, marketData, assetType,
         );
         const llmMs = Date.now() - llmStart;
 

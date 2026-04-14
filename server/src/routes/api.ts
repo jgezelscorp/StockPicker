@@ -259,9 +259,20 @@ router.get('/analysis/decisions', (_req, res) => {
 
 // ─── Watchlist ──────────────────────────────────────────────────
 
-router.get('/watchlist', (_req, res) => {
+router.get('/watchlist', (req, res) => {
   try {
     const db = getDb();
+    const { type } = req.query;
+    
+    // Build WHERE clause with optional type filtering
+    let whereClause = 's.is_active = 1';
+    const params: any[] = [];
+    
+    if (type && (type === 'stock' || type === 'etf')) {
+      whereClause += ' AND s.asset_type = ?';
+      params.push(type);
+    }
+    
     const stocks = db.prepare(`
       SELECT s.*,
         (SELECT COUNT(*) FROM signals WHERE stock_id = s.id) as signal_count,
@@ -269,9 +280,9 @@ router.get('/watchlist', (_req, res) => {
         (SELECT pp.quantity FROM portfolio_positions pp WHERE pp.stock_id = s.id AND pp.quantity > 0) as held_quantity,
         (SELECT MAX(al.analysed_at) FROM analysis_logs al WHERE al.stock_id = s.id) as last_analysed_at
       FROM stocks s
-      WHERE s.is_active = 1
+      WHERE ${whereClause}
       ORDER BY s.symbol ASC
-    `).all();
+    `).all(...params);
     res.json({ success: true, data: stocks });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

@@ -30,9 +30,9 @@ export interface ReasoningResult {
   tokensUsed: number;
 }
 
-// ─── System prompt ──────────────────────────────────────────────
+// ─── System prompts ──────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are APEX, an autonomous stock-picking analyst. You receive quantitative signal data and market context for a stock, and must produce a qualitative assessment.
+const SYSTEM_PROMPT_STOCK = `You are APEX, an autonomous stock-picking analyst. You receive quantitative signal data and market context for a stock, and must produce a qualitative assessment.
 
 Your job:
 1. INTERPRET the quantitative signals — what story do they tell together?
@@ -55,6 +55,34 @@ Rules:
 - "nuanced" means you partly agree but see material factors the signals miss.
 - conviction of 0 = no view, ±0.3 = mild, ±0.6 = moderate, ±1.0 = extreme conviction.`;
 
+const SYSTEM_PROMPT_ETF = `You are APEX, an autonomous ETF analyst. You receive quantitative signal data and market context for an ETF, and must produce a qualitative assessment.
+
+Your job:
+1. INTERPRET the quantitative signals with a MACRO LENS — how do broader economic trends, geopolitical events, and sector rotation impact this ETF?
+2. IDENTIFY macro risks and catalysts — interest rate changes, inflation, trade policy, geopolitical events, sector-specific regulation
+3. ASSESS the investment case over a LONGER HORIZON (weeks to months, not days)
+4. CONSIDER what the ETF holds — sector concentration, geographic exposure, thematic relevance
+5. PROVIDE a conviction score from -1.0 (strong sell) to +1.0 (strong buy)
+
+Respond ONLY in valid JSON with this exact structure:
+{
+  "assessment": "2-4 sentence analyst-quality assessment of this ETF focusing on macro outlook and sector positioning",
+  "verdict": "agree" | "disagree" | "nuanced",
+  "conviction": <number between -1.0 and 1.0>,
+  "risks": ["macro/sector risk 1", "macro/sector risk 2"],
+  "catalysts": ["macro/sector catalyst 1", "macro/sector catalyst 2"]
+}
+
+Rules:
+- Focus on MACRO-ECONOMIC OUTLOOK and its impact on the ETF's sector/theme
+- Consider GEOPOLITICAL RISKS and opportunities
+- Think about SECTOR ROTATION and momentum
+- Longer investment horizon: weeks/months, not intraday moves
+- ETF composition matters: what it holds, concentration risk, geographic exposure
+- Be concise and specific. No generic platitudes.
+- If data is thin, say so and lower conviction toward 0.
+- conviction of 0 = no view, ±0.3 = mild, ±0.6 = moderate, ±1.0 = extreme conviction.`;
+
 // ─── Build user prompt from signal + market data ────────────────
 
 function buildUserPrompt(
@@ -63,10 +91,12 @@ function buildUserPrompt(
   market: string,
   aggregate: AggregateSignalResult,
   marketData: MarketData,
+  assetType: string = 'stock',
 ): string {
   const parts: string[] = [];
 
-  parts.push(`## Stock: ${symbol} (${stockName}) — Market: ${market}`);
+  const assetLabel = assetType === 'etf' ? 'ETF' : 'Stock';
+  parts.push(`## ${assetLabel}: ${symbol} (${stockName}) — Market: ${market}`);
   parts.push('');
 
   // Quantitative signals summary
@@ -209,7 +239,7 @@ function buildFallbackResult(aggregate: AggregateSignalResult): ReasoningResult 
 // ─── Main export ────────────────────────────────────────────────
 
 /**
- * Run LLM-powered qualitative reasoning on a stock analysis.
+ * Run LLM-powered qualitative reasoning on a stock or ETF analysis.
  * Falls back to rule-based rationale if no LLM provider is configured.
  */
 export async function analyzeWithReasoning(
@@ -218,15 +248,18 @@ export async function analyzeWithReasoning(
   market: string,
   aggregate: AggregateSignalResult,
   marketData: MarketData,
+  assetType: 'stock' | 'etf' = 'stock',
 ): Promise<ReasoningResult> {
   if (!isLLMAvailable()) {
     return buildFallbackResult(aggregate);
   }
 
-  const userPrompt = buildUserPrompt(symbol, stockName, market, aggregate, marketData);
+  const systemPrompt = assetType === 'etf' ? SYSTEM_PROMPT_ETF : SYSTEM_PROMPT_STOCK;
+  const userPrompt = buildUserPrompt(symbol, stockName, market, aggregate, marketData, assetType);
 
   // Level 4: Log prompt summary
-  logActivity('reasoning', 'llm', `Sending to LLM: analysis of ${symbol} (${stockName}), score ${aggregate.overallScore}/100, rec ${aggregate.recommendation}`, symbol, {
+  logActivity('reasoning', 'llm', `Sending to LLM: analysis of ${symbol} (${stockName}) [${assetType}], score ${aggregate.overallScore}/100, rec ${aggregate.recommendation}`, symbol, {
+    assetType,
     signalCount: aggregate.signals.length,
     overallScore: aggregate.overallScore,
     recommendation: aggregate.recommendation,
@@ -235,11 +268,12 @@ export async function analyzeWithReasoning(
 
   // Level 5: Full prompt text
   logActivity('reasoning', 'llm', `LLM full prompt for ${symbol}`, symbol, {
-    systemPrompt: SYSTEM_PROMPT,
+    assetType,
+    systemPrompt,
     userPrompt,
   }, 5);
 
-  const response = await chatCompletion(SYSTEM_PROMPT, userPrompt);
+  const response = await chatCompletion(systemPrompt, userPrompt);
 
   if (!response) {
     console.warn(`[Reasoning] LLM call returned null for ${symbol}, using fallback`);

@@ -104,3 +104,15 @@
 - **Files Modified:** db/schema.ts (analysis_runs), scheduler.ts (pipeline + run logging), marketData.ts (fetchExtendedFundamentals), reasoningEngine.ts (prompt), routes/api.ts (endpoint).
 - **Quality:** Clean TypeScript. 82 existing tests passing. Zero regressions.
 - **Team Impact:** Malcolm gains 7 new fields for valuation. Ellie can display analysis run history in ActivityLog. System reduces API dependency concentration.
+
+### 2026-04-16 — ETF-Specific Analysis Pipeline Routing
+- **Asset Type Routing:** Updated scheduler.ts to check `stock.asset_type` and route ETFs to `analyzeETF()` (from signals/etfSignals.ts) and stocks to `analyzeStock()`. Graceful fallback: if Malcolm's etfSignals.ts isn't ready yet, ETFs use stock analysis with warning log.
+- **Dynamic Import:** Added try-catch wrapper to load analyzeETF dynamically. If file doesn't exist, `analyzeETF` is null and scheduler falls back. Function signature matches: `analyzeETF(marketData: MarketData): Promise<AggregateSignalResult>`.
+- **Reasoning Engine Updated:** `analyzeWithReasoning()` now accepts 6th parameter `assetType: string = 'stock'`. LLM prompt context shows "ETF: SPY" vs "Stock: AAPL" based on asset type. Malcolm will add ETF-specific guidance to system prompt.
+- **API Type Filtering:** `GET /api/watchlist?type=stock` or `?type=etf` now supported. Added optional `type` query parameter that filters by `asset_type` column in WHERE clause. Response already includes `asset_type` from DB.
+- **Pipeline Logging:** Added verbosity level 3 logging for asset type and pipeline selection: `"${symbol}: Using ETF analysis pipeline"` vs stock pipeline. ETF fallback warning logged at level 3.
+- **Backward Compatibility:** Stock analysis unchanged. ETFs can use stock signals until Malcolm creates etfSignals.ts. No breaking changes to API contracts or DB schema.
+- **Files Modified:** scheduler.ts (routing + ETF import stub + assetType flow), reasoningEngine.ts (assetType param + prompt), api.ts (type filtering).
+- **Quality:** Clean TypeScript build (`tsc --noEmit`). Zero regressions.
+- **Team Impact:** Malcolm can create ETF signals independently. Ellie gets type filtering for frontend. Grant's architecture supports multi-asset-type expansion.
+

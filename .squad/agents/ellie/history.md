@@ -84,3 +84,13 @@
 - **Consistency:** Follows existing hooks pattern. No new dependencies. Placement in ActivityLog alongside verbosity filtering and log stream makes pipeline observability comprehensive.
 - **Quality:** TypeScript clean. Tested with mock data before backend endpoint finalization.
 - **Team Impact:** Jan gains real-time visibility into system execution. Run history enables quick error diagnosis and throughput monitoring.
+
+### 2026-04-17 — Discovery Page: Stocks & ETFs Tab Separation
+- **Tab-Based Layout:** Discovery page now separates stocks and ETFs into distinct tabs with emoji icons (📈 Stocks | 📊 ETFs) and live counts showing items in each category.
+- **Client-Side Filtering:** Filter watchlist data by `asset_type` field. Created two derived arrays: `stocks = watchlist.filter(s => s.asset_type !== 'etf')` and `etfs = watchlist.filter(s => s.asset_type === 'etf')`. No backend changes required.
+- **ETF Table Enhancement:** Added "Type" column to ETF tab showing orange ETF badge. Both tabs show identical columns (Symbol, Name, Market, Sector, Price, P/E, P/B, EPS, Mkt Cap, 52w High/Low, Last Analyzed, Signals, Status, Actions).
+- **Tab Styling:** Active tab uses `var(--bg-tertiary)` background with cyan (`#00d4ff`) bottom border. Inactive tabs are muted with hover effects for discoverability. Smooth transitions via `transition: all 0.2s ease`.
+- **Add Stock Form Integration:** Asset type selector now syncs with active tab via `useEffect`. When on Stocks tab, defaults to "stock". When on ETFs tab, defaults to "etf". User can still override manually.
+- **Recently Discovered Section:** Added "Type" column with colored badges (cyan for stocks, orange for ETFs) to distinguish asset types at a glance.
+- **All Functionality Preserved:** Search, sort, filter, click-to-detail modal, analyze buttons, remove actions, discovery/analysis pipeline triggers all work identically on both tabs.
+- **No Dependencies Added:** Pure React state management with `useState<TabType>` and `useMemo` for filtered arrays. TypeScript compiles clean. Vite hot-reload works on port 5174.

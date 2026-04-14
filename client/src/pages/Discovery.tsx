@@ -79,6 +79,8 @@ function fmtMktCap(v: number): string {
   return `$${v.toLocaleString()}`;
 }
 
+type TabType = 'stocks' | 'etfs';
+
 export default function Discovery() {
   const watchlist = useWatchlist();
   const status = useSystemStatus();
@@ -86,6 +88,7 @@ export default function Discovery() {
   const analyze = useRunAnalysis();
   const remove = useRemoveStock();
 
+  const [activeTab, setActiveTab] = useState<TabType>('stocks');
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [addForm, setAddForm] = useState({ symbol: '', market: 'US', assetType: 'stock', sector: '' });
   const [selectedStock, setSelectedStock] = useState<string | null>(null);
@@ -140,7 +143,8 @@ export default function Discovery() {
   const lastAnalysis: string | undefined = s.lastAnalysisRun ?? s.last_analysis_run;
   const nextRun = useMemo(() => getNextRunTime(lastAnalysis), [lastAnalysis]);
   const countdown = useCountdown(nextRun);
-  const stocks = useMemo(() => {
+  
+  const allStocks = useMemo(() => {
     const raw = watchlist.data?.data ?? watchlist.data ?? [];
     if (!Array.isArray(raw)) return [];
     return [...raw].sort((a: any, b: any) => {
@@ -151,13 +155,31 @@ export default function Discovery() {
     });
   }, [watchlist.data]);
 
+  const stocks = useMemo(() => {
+    return allStocks.filter((s: any) => (s.asset_type ?? s.assetType) !== 'etf');
+  }, [allStocks]);
+
+  const etfs = useMemo(() => {
+    return allStocks.filter((s: any) => (s.asset_type ?? s.assetType) === 'etf');
+  }, [allStocks]);
+
+  const displayedItems = activeTab === 'stocks' ? stocks : etfs;
+
   const recentlyDiscovered = useMemo(() => {
-    if (!Array.isArray(stocks)) return [];
-    return [...stocks]
+    if (!Array.isArray(allStocks)) return [];
+    return [...allStocks]
       .filter((s: any) => s.created_at)
       .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 10);
-  }, [stocks]);
+  }, [allStocks]);
+
+  // Sync add form asset type with active tab
+  useEffect(() => {
+    setAddForm(prev => ({
+      ...prev,
+      assetType: activeTab === 'stocks' ? 'stock' : 'etf'
+    }));
+  }, [activeTab]);
 
   return (
     <div>
@@ -336,8 +358,79 @@ export default function Discovery() {
 
       {/* ─── Watchlist Table ─── */}
       <div className="card" style={{ marginBottom: '1.5rem' }}>
+        {/* Tab Switcher */}
+        <div style={{ 
+          display: 'flex', 
+          gap: '0.5rem', 
+          borderBottom: '1px solid var(--border-primary)', 
+          marginBottom: '1rem',
+          paddingBottom: '0.5rem'
+        }}>
+          <button
+            onClick={() => setActiveTab('stocks')}
+            style={{
+              background: activeTab === 'stocks' ? 'var(--bg-tertiary)' : 'transparent',
+              color: activeTab === 'stocks' ? 'var(--text-primary)' : 'var(--text-muted)',
+              border: 'none',
+              borderBottom: activeTab === 'stocks' ? '2px solid #00d4ff' : '2px solid transparent',
+              padding: '0.5rem 1rem',
+              fontSize: '0.9rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              borderRadius: '4px 4px 0 0',
+            }}
+            onMouseEnter={(e) => {
+              if (activeTab !== 'stocks') {
+                e.currentTarget.style.background = 'var(--bg-tertiary)';
+                e.currentTarget.style.color = 'var(--text-secondary)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (activeTab !== 'stocks') {
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--text-muted)';
+              }
+            }}
+          >
+            📈 Stocks {stocks.length > 0 && `(${stocks.length})`}
+          </button>
+          <button
+            onClick={() => setActiveTab('etfs')}
+            style={{
+              background: activeTab === 'etfs' ? 'var(--bg-tertiary)' : 'transparent',
+              color: activeTab === 'etfs' ? 'var(--text-primary)' : 'var(--text-muted)',
+              border: 'none',
+              borderBottom: activeTab === 'etfs' ? '2px solid #00d4ff' : '2px solid transparent',
+              padding: '0.5rem 1rem',
+              fontSize: '0.9rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              borderRadius: '4px 4px 0 0',
+            }}
+            onMouseEnter={(e) => {
+              if (activeTab !== 'etfs') {
+                e.currentTarget.style.background = 'var(--bg-tertiary)';
+                e.currentTarget.style.color = 'var(--text-secondary)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (activeTab !== 'etfs') {
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--text-muted)';
+              }
+            }}
+          >
+            📊 ETFs {etfs.length > 0 && `(${etfs.length})`}
+          </button>
+        </div>
+
         <div className="card-header">
-          Watchlist ({stocks.length} stock{stocks.length !== 1 ? 's' : ''})
+          {activeTab === 'stocks' 
+            ? `Stocks Watchlist (${stocks.length})`
+            : `ETFs Watchlist (${etfs.length})`
+          }
         </div>
         {watchlist.isLoading ? (
           <div className="loading-state">Loading watchlist…</div>
@@ -354,9 +447,14 @@ export default function Discovery() {
               </button>
             </div>
           </div>
-        ) : stocks.length === 0 ? (
+        ) : displayedItems.length === 0 ? (
           <div className="empty-state">
-            <p>No stocks in watchlist yet — add one above or run discovery.</p>
+            <p>
+              {activeTab === 'stocks'
+                ? 'No stocks in watchlist yet — add one above or run discovery.'
+                : 'No ETFs in watchlist yet — add one above or run discovery.'
+              }
+            </p>
           </div>
         ) : (
           <table className="data-table" style={{ marginTop: '0.5rem' }}>
@@ -364,6 +462,7 @@ export default function Discovery() {
               <tr>
                 <th>Symbol</th>
                 <th>Name</th>
+                {activeTab === 'etfs' && <th className="center">Type</th>}
                 <th className="center">Market</th>
                 <th>Sector</th>
                 <th className="right">Price</th>
@@ -380,7 +479,7 @@ export default function Discovery() {
               </tr>
             </thead>
             <tbody>
-              {stocks.map((stock: any) => (
+              {displayedItems.map((stock: any) => (
                 <tr key={stock.id}>
                   <td
                     style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
@@ -393,6 +492,21 @@ export default function Discovery() {
                   <td style={{ color: 'var(--text-secondary)', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {stock.name || '—'}
                   </td>
+                  {activeTab === 'etfs' && (
+                    <td className="center">
+                      <span style={{
+                        display: 'inline-flex',
+                        padding: '0.15rem 0.5rem',
+                        borderRadius: '4px',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        background: '#f0883e15',
+                        color: '#f0883e',
+                      }}>
+                        ETF
+                      </span>
+                    </td>
+                  )}
                   <td className="center">
                     <span style={{
                       display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
@@ -467,6 +581,7 @@ export default function Discovery() {
             <thead>
               <tr>
                 <th>Symbol</th>
+                <th className="center">Type</th>
                 <th className="center">Market</th>
                 <th>Sector</th>
                 <th>Discovered</th>
@@ -474,35 +589,52 @@ export default function Discovery() {
               </tr>
             </thead>
             <tbody>
-              {recentlyDiscovered.map((stock: any) => (
-                <tr key={stock.id}>
-                  <td
-                    style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
-                    onClick={() => setSelectedStock(stock.symbol)}
-                    onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
-                    onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
-                  >
-                    {stock.symbol}
-                  </td>
-                  <td className="center">
-                    <span style={{ color: MARKET_COLOR[stock.market] || 'var(--text-muted)' }}>
-                      {MARKET_FLAG[stock.market] || '🌐'} {stock.market}
-                    </span>
-                  </td>
-                  <td style={{ color: 'var(--text-secondary)' }}>{stock.sector || '—'}</td>
-                  <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                    {timeAgo(stock.created_at)}
-                  </td>
-                  <td style={{ fontSize: '0.8rem' }}>
-                    <span style={{
-                      padding: '0.1rem 0.4rem', borderRadius: '4px',
-                      background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
-                    }}>
-                      {stock.discovery_method ?? stock.discoveryMethod ?? 'manual'}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {recentlyDiscovered.map((stock: any) => {
+                const assetType = stock.asset_type ?? stock.assetType ?? 'stock';
+                const isEtf = assetType === 'etf';
+                return (
+                  <tr key={stock.id}>
+                    <td
+                      style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--accent)' }}
+                      onClick={() => setSelectedStock(stock.symbol)}
+                      onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                      onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                    >
+                      {stock.symbol}
+                    </td>
+                    <td className="center">
+                      <span style={{
+                        display: 'inline-flex',
+                        padding: '0.15rem 0.5rem',
+                        borderRadius: '4px',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        background: isEtf ? '#f0883e15' : '#00d4ff15',
+                        color: isEtf ? '#f0883e' : '#00d4ff',
+                      }}>
+                        {isEtf ? 'ETF' : 'Stock'}
+                      </span>
+                    </td>
+                    <td className="center">
+                      <span style={{ color: MARKET_COLOR[stock.market] || 'var(--text-muted)' }}>
+                        {MARKET_FLAG[stock.market] || '🌐'} {stock.market}
+                      </span>
+                    </td>
+                    <td style={{ color: 'var(--text-secondary)' }}>{stock.sector || '—'}</td>
+                    <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                      {timeAgo(stock.created_at)}
+                    </td>
+                    <td style={{ fontSize: '0.8rem' }}>
+                      <span style={{
+                        padding: '0.1rem 0.4rem', borderRadius: '4px',
+                        background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                      }}>
+                        {stock.discovery_method ?? stock.discoveryMethod ?? 'manual'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
