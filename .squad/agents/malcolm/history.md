@@ -41,3 +41,35 @@
 - **Updated `server/src/services/llm/reasoningEngine.ts`:** Added ETF-specific system prompt (`SYSTEM_PROMPT_ETF`) emphasizing macro outlook, geopolitical risks, sector rotation, longer investment horizon (weeks/months), and ETF composition considerations. Stock prompt kept as `SYSTEM_PROMPT_STOCK`. `analyzeWithReasoning()` now accepts `assetType` parameter and routes to appropriate prompt.
 - **Updated `server/src/services/scheduler.ts`:** Integrated `analyzeAsset()` dispatcher — automatically routes ETFs to ETF analyzer, stocks to stock analyzer. Removed old stub code. LLM reasoning already passing `assetType`.
 - **All tests pass:** 82 tests including signal aggregation, trading engine, and API endpoints. Build succeeds with no TypeScript errors.
+
+### 2026-04-15 — Trading Threshold Overhaul (Trades Now Executable)
+
+**Problem:** After 10 analysis runs, zero trades executed. Root cause: `minTradeConfidence` was 72% but max achievable confidence was ~55% due to signal limitations (Google Trends CAPTCHA failures, weak social sentiment proxy, average-weighted confidence math).
+
+**Solution — Multi-pronged fix:**
+
+1. **Lowered base threshold** (`types.ts`): Changed `minTradeConfidence` from 0.72 to 0.55 — aligns with actual signal capability rather than aspirational target.
+
+2. **LLM conviction boost** (`scheduler.ts` line 495-534): Added confidence adjustment based on LLM reasoning verdict BEFORE shouldBuy/shouldSell:
+   - LLM agrees + conviction > 0.6 → +25% confidence boost
+   - LLM agrees + conviction > 0.3 → +15% confidence boost
+   - LLM disagrees → -15% confidence reduction
+   - LLM nuanced → no change
+   - Capped boosted confidence at 0.95
+   - This allows strong signal+LLM alignment to reach trading threshold while weak signals stay filtered.
+
+3. **Tiered position sizing** (`tradingEngine.ts` shouldBuy line 216-233): Replaced binary 70%/100% sizing with 4-tier system:
+   - 55-65% confidence → 40% of max position ("toe in the water")
+   - 65-75% confidence → 65% of max position (medium)
+   - 75-85% confidence → 85% of max position (standard)
+   - 85%+ confidence → 100% of max position (full conviction)
+   - Position size now proportional to confidence, reducing risk on marginal signals.
+
+4. **Relaxed recommendation filter** (`tradingEngine.ts` shouldBuy line 172-181): Added soft-buy logic for edge cases where composite score > 0.15 (bullish lean) + confidence ≥ 60% but recommendation maps to 'hold' due to tight threshold. Prevents missing good trades blocked by score quantization.
+
+5. **Bug fix** (`signals/index.ts` line 261): Fixed typo `stock.asset_type` → `stock.assetType` for ETF routing consistency.
+
+**Impact:** Trading engine can now execute when signals + LLM align with moderate-to-strong conviction. Conservative 55% base threshold filters weak signals; LLM boost rewards qualitative confirmation. Tiered sizing manages risk exposure proportionally.
+
+**TypeScript:** All changes compile cleanly with `npx tsc --noEmit`.
+

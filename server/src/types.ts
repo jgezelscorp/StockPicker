@@ -32,7 +32,7 @@ export const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
   analysisCron: '0 */4 * * *',     // every 4 hours
   snapshotCron: '0 18 * * 1-5',    // weekdays at 6 PM
   learningCron: '0 20 * * 0',      // Sundays at 8 PM
-  minTradeConfidence: 0.72,
+  minTradeConfidence: 0.55,        // lowered from 0.72 — was mathematically unreachable
   maxPositionPct: 0.15,
   maxOpenPositions: 20,
 };

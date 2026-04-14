@@ -658,6 +658,42 @@ router.post('/discover', async (_req, res) => {
   }
 });
 
+// Event-driven discovery endpoints
+router.post('/discover/events', async (_req, res) => {
+  try {
+    const { runEventDrivenDiscovery } = await import('../services/eventDrivenDiscovery');
+    const result = await runEventDrivenDiscovery();
+    res.json({
+      success: true,
+      data: {
+        timestamp: result.timestamp,
+        events_found: result.events.length,
+        symbols_added: result.symbols_added,
+        symbols_updated: result.symbols_updated,
+        events: result.events,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/discover/events/latest', (_req, res) => {
+  try {
+    const { getLatestDiscoveryEvents } = require('../services/eventDrivenDiscovery');
+    const result = getLatestDiscoveryEvents();
+    res.json({
+      success: true,
+      data: {
+        count: result.count,
+        events: result.events,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.post('/analyze/run', async (_req, res) => {
   try {
     const result = await runAnalysisPipeline(DEFAULT_SCHEDULER_CONFIG);

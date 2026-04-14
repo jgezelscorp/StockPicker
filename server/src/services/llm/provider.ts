@@ -88,6 +88,7 @@ function getClient(): OpenAI | AzureOpenAI | null {
 export async function chatCompletion(
   systemPrompt: string,
   userPrompt: string,
+  options?: { maxTokens?: number; temperature?: number },
 ): Promise<LLMResponse | null> {
   const cfg = getLLMConfig();
   if (cfg.provider === 'none') return null;
@@ -96,11 +97,13 @@ export async function chatCompletion(
   if (!openai) return null;
 
   try {
+    const effectiveMaxTokens = options?.maxTokens ?? cfg.maxTokens;
+    const effectiveTemperature = options?.temperature ?? cfg.temperature;
     // Newer models (gpt-5.x etc.) require max_completion_tokens instead of max_tokens
     const isNewerModel = /gpt-5|o[1-9]/.test(cfg.model);
     const tokenParam = isNewerModel
-      ? { max_completion_tokens: cfg.maxTokens }
-      : { max_tokens: cfg.maxTokens };
+      ? { max_completion_tokens: effectiveMaxTokens }
+      : { max_tokens: effectiveMaxTokens };
     const response = await openai.chat.completions.create({
       model: cfg.model,
       messages: [
@@ -108,7 +111,7 @@ export async function chatCompletion(
         { role: 'user', content: userPrompt },
       ],
       ...tokenParam,
-      temperature: cfg.temperature,
+      temperature: effectiveTemperature,
     });
 
     const choice = response.choices[0];

@@ -18,6 +18,7 @@ import { fetchSearchTrend } from './apis/googleTrends';
 import { seedInitialUniverse, discoverNewStocks, pruneInactiveStocks } from './stockDiscovery';
 import { analyzeWithReasoning, buildEnhancedRationale } from './llm';
 import { logActivity } from './activityLogger';
+import { runEventDrivenDiscovery } from './eventDrivenDiscovery';
 
 let activeTasks: cron.ScheduledTask[] = [];
 
@@ -197,9 +198,10 @@ async function collectSignals(symbol: string, market: string): Promise<SignalInp
 
 /**
  * Run the main analysis pipeline:
- *  1. Fetch signals for all active stocks
- *  2. Score each stock with composite analysis
- *  3. Execute trades where confidence exceeds threshold
+ *  1. Run event-driven discovery (scan news for macro events)
+ *  2. Fetch signals for all active stocks
+ *  3. Score each stock with composite analysis
+ *  4. Execute trades where confidence exceeds threshold
  */
 async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRunResult> {
   const start = Date.now();
@@ -215,6 +217,22 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
 
   try {
     const db = getDb();
+
+    // 0. Run event-driven discovery before analysis to catch fresh macro events
+    try {
+      logActivity('info', 'discovery', 'Running event-driven discovery before analysis', undefined, undefined, 3);
+      const eventResult = await runEventDrivenDiscovery();
+      if (eventResult.symbols_added > 0 || eventResult.symbols_updated > 0) {
+        logActivity('discovery', 'discovery', `Event discovery: ${eventResult.symbols_added} added, ${eventResult.symbols_updated} reactivated from ${eventResult.events.length} macro events`, undefined, {
+          events: eventResult.events.length,
+          added: eventResult.symbols_added,
+          updated: eventResult.symbols_updated,
+        }, 2);
+      }
+    } catch (err: any) {
+      logActivity('warn', 'discovery', `Event-driven discovery failed: ${err.message}`, undefined, undefined, 3);
+      // Continue with analysis even if event discovery fails
+    }
 
     // Record the analysis run
     const insertRun = db.prepare(`
@@ -493,9 +511,44 @@ async function runAnalysisPipeline(config: SchedulerConfig): Promise<PipelineRun
         if (!quote || quote.price <= 0) continue;
 
         // Map the aggregate result to the trading engine's evaluation format
+        let boostedConfidence = aggregate.overallConfidence;
+        
+        // Boost confidence based on LLM conviction when it agrees with signal direction
+        if (reasoning.llmUsed) {
+          const llmVerdict = reasoning.llmVerdict;
+          const llmConviction = reasoning.llmConviction;
+          
+          if (llmVerdict === 'agree' && llmConviction > 0.6) {
+            // Strong LLM agreement = +25% confidence boost
+            boostedConfidence = Math.min(0.95, boostedConfidence + 0.25);
+            logActivity('reasoning', 'llm', `LLM strong agreement: boosted confidence from ${(aggregate.overallConfidence * 100).toFixed(1)}% to ${(boostedConfidence * 100).toFixed(1)}%`, stock.symbol, {
+              originalConfidence: aggregate.overallConfidence,
+              boostedConfidence,
+              llmConviction,
+            }, 3);
+          } else if (llmVerdict === 'agree' && llmConviction > 0.3) {
+            // Moderate LLM agreement = +15% confidence boost
+            boostedConfidence = Math.min(0.95, boostedConfidence + 0.15);
+            logActivity('reasoning', 'llm', `LLM moderate agreement: boosted confidence from ${(aggregate.overallConfidence * 100).toFixed(1)}% to ${(boostedConfidence * 100).toFixed(1)}%`, stock.symbol, {
+              originalConfidence: aggregate.overallConfidence,
+              boostedConfidence,
+              llmConviction,
+            }, 3);
+          } else if (llmVerdict === 'disagree') {
+            // LLM disagrees = -15% confidence reduction
+            boostedConfidence = Math.max(0, boostedConfidence - 0.15);
+            logActivity('reasoning', 'llm', `LLM disagreement: reduced confidence from ${(aggregate.overallConfidence * 100).toFixed(1)}% to ${(boostedConfidence * 100).toFixed(1)}%`, stock.symbol, {
+              originalConfidence: aggregate.overallConfidence,
+              boostedConfidence,
+              llmConviction,
+            }, 3);
+          }
+          // nuanced verdict = no change
+        }
+
         const evaluation = {
           compositeScore: aggregate.compositeScore,
-          confidence: aggregate.overallConfidence,
+          confidence: boostedConfidence,
           recommendation: aggregate.recommendation,
           signalBreakdown: Object.fromEntries(
             aggregate.weightedBreakdown.map(wb => [wb.source, {
@@ -747,15 +800,32 @@ export { runAnalysisPipeline, takePortfolioSnapshot, runLearningEvaluation };
 
 /**
  * Run stock discovery: find new stocks and prune inactive ones.
+ * Now includes event-driven discovery before traditional screener discovery.
  */
-async function runStockDiscovery(): Promise<{ discovered: number; pruned: number }> {
+async function runStockDiscovery(): Promise<{ discovered: number; pruned: number; event_driven: number }> {
+  // 1. Run event-driven discovery first
+  let eventDrivenCount = 0;
+  try {
+    const eventResult = await runEventDrivenDiscovery();
+    eventDrivenCount = eventResult.symbols_added + eventResult.symbols_updated;
+    logActivity('discovery', 'discovery', `Event-driven discovery: ${eventResult.symbols_added} added, ${eventResult.symbols_updated} reactivated`, undefined, {
+      events: eventResult.events.length,
+      symbols_added: eventResult.symbols_added,
+      symbols_updated: eventResult.symbols_updated,
+    }, 2);
+  } catch (err: any) {
+    logActivity('error', 'discovery', `Event-driven discovery failed: ${err.message}`, undefined, undefined, 2);
+  }
+
+  // 2. Run traditional screener-based discovery (fallback)
   const discovered = await discoverNewStocks();
   const pruned = pruneInactiveStocks();
-  logActivity('discovery', 'discovery', `Stock discovery: found ${discovered} new stocks`, undefined, {
-    newStocks: discovered,
+  logActivity('discovery', 'discovery', `Stock discovery completed: ${eventDrivenCount} from events, ${discovered} from screeners, ${pruned} pruned`, undefined, {
+    eventDrivenStocks: eventDrivenCount,
+    screenerStocks: discovered,
     pruned,
   }, 2);
-  return { discovered, pruned };
+  return { discovered, pruned, event_driven: eventDrivenCount };
 }
 
 export { runStockDiscovery, seedInitialUniverse };

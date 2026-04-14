@@ -151,7 +151,7 @@ function scoreToRecommendation(
 
 /**
  * Decision logic: should we buy this stock?
- * Only buy when confidence > 72%, respecting position limits.
+ * Only buy when confidence > 55%, respecting position limits.
  */
 export function shouldBuy(
   symbol: string,
@@ -169,11 +169,17 @@ export function shouldBuy(
     };
   }
 
-  // Must be a buy/strong_buy recommendation
-  if (evaluation.recommendation !== 'buy' && evaluation.recommendation !== 'strong_buy') {
+  // Must be a buy/strong_buy recommendation, OR a hold with bullish lean + high confidence
+  // (relaxation: if composite score shows bullish lean and confidence is high, treat as soft buy)
+  const isBuyOrStrongBuy = evaluation.recommendation === 'buy' || evaluation.recommendation === 'strong_buy';
+  const isSoftBuy = evaluation.recommendation === 'hold' && 
+                    evaluation.compositeScore > 0.15 && 
+                    evaluation.confidence >= config.minTradeConfidence + 0.05;
+
+  if (!isBuyOrStrongBuy && !isSoftBuy) {
     return {
       shouldTrade: false, action: 'buy', quantity: 0,
-      reason: `Recommendation is ${evaluation.recommendation}, not a buy signal`,
+      reason: `Recommendation is ${evaluation.recommendation}, not a buy signal (composite: ${evaluation.compositeScore.toFixed(3)})`,
     };
   }
 
@@ -213,8 +219,28 @@ export function shouldBuy(
     };
   }
 
-  // Position size scales with confidence — higher confidence = bigger position
-  const convictionMultiplier = evaluation.recommendation === 'strong_buy' ? 1.0 : 0.7;
+  // Tiered position sizing based on confidence level
+  // 55-65%: Small position (40% of max) — "toe in the water"
+  // 65-75%: Medium position (65% of max)
+  // 75-85%: Standard position (85% of max)
+  // 85%+:   Full conviction (100% of max)
+  let convictionMultiplier: number;
+  let sizeLabel: string;
+  
+  if (evaluation.confidence >= 0.85) {
+    convictionMultiplier = 1.0;
+    sizeLabel = 'full conviction';
+  } else if (evaluation.confidence >= 0.75) {
+    convictionMultiplier = 0.85;
+    sizeLabel = 'standard';
+  } else if (evaluation.confidence >= 0.65) {
+    convictionMultiplier = 0.65;
+    sizeLabel = 'medium';
+  } else {
+    convictionMultiplier = 0.40;
+    sizeLabel = 'small (toe in the water)';
+  }
+
   const targetValue = Math.min(maxPositionValue * convictionMultiplier, availableCash);
   const quantity = Math.floor(targetValue / currentPrice);
 
@@ -229,7 +255,7 @@ export function shouldBuy(
     shouldTrade: true,
     action: 'buy',
     quantity,
-    reason: `Buy signal: confidence ${(evaluation.confidence * 100).toFixed(1)}%, ${evaluation.recommendation}. Position: ${quantity} shares @ $${currentPrice.toFixed(2)} = $${(quantity * currentPrice).toFixed(2)}`,
+    reason: `Buy signal: confidence ${(evaluation.confidence * 100).toFixed(1)}%, ${evaluation.recommendation}. ${sizeLabel} position: ${quantity} shares @ $${currentPrice.toFixed(2)} = $${(quantity * currentPrice).toFixed(2)}`,
   };
 }
 

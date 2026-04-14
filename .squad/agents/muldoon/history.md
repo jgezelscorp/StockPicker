@@ -116,3 +116,29 @@
 - **Quality:** Clean TypeScript build (`tsc --noEmit`). Zero regressions.
 - **Team Impact:** Malcolm can create ETF signals independently. Ellie gets type filtering for frontend. Grant's architecture supports multi-asset-type expansion.
 
+### 2026-04-17 — Event-Driven Stock Discovery with LLM
+- **Problem:** Static discovery based on hardcoded seeds and Yahoo screeners. Watchlist didn't reflect current macro events (wars, tariffs, geopolitical crises). User requested: "when the president does something that would start a war or higher gas prices, the list should reflect stocks that benefit from this".
+- **New Service:** `server/src/services/eventDrivenDiscovery.ts` — LLM-powered event-driven discovery that:
+  - Fetches news headlines from Finnhub API (general, forex, crypto categories)
+  - Analyzes headlines with LLM (via `chatCompletion()`) to identify macro/geopolitical events
+  - LLM suggests 5-10 stocks + 2-3 ETFs that BENEFIT from each event
+  - LLM identifies 2-3 stocks negatively impacted (for awareness, not added to watchlist)
+  - Returns structured JSON with events, beneficiaries, reasoning, and confidence levels
+- **Database Schema:** Added 3 new columns to `stocks` table via safe migration in `db/schema.ts`:
+  - `discovery_reason TEXT` — why this stock was added (e.g., "Rising oil prices due to Middle East tensions")
+  - `discovered_at TEXT` — timestamp when discovered by event system
+  - `discovery_event TEXT` — the macro event that triggered it (e.g., "Oil price surge due to sanctions")
+- **Scheduler Integration:** 
+  - `runAnalysisPipeline()` now runs event-driven discovery BEFORE each analysis cycle (every 4 hours)
+  - `runStockDiscovery()` updated to run event discovery first, then fallback to Yahoo screeners
+  - Returns `{ discovered, pruned, event_driven }` with counts
+- **API Endpoints:** Added 2 new endpoints in `routes/api.ts`:
+  - `POST /api/discover/events` — manual trigger for event-driven discovery
+  - `GET /api/discover/events/latest` — returns last 50 event-discovered stocks with discovery metadata
+- **LLM Prompt Design:** Detailed system prompt instructs LLM to identify geopolitical events (wars, sanctions, trade disputes), macro shifts (rates, inflation), sector catalysts (regulations, policy), energy/commodity moves, currency fluctuations. Returns beneficiaries and negatively impacted stocks with reasoning.
+- **Logging:** Full activity logging (v2-v5) for discovery runs, events found, symbols added/reactivated, LLM token usage. All discoveries logged with structured details (event, reason, confidence).
+- **Graceful Degradation:** Continues if Finnhub API unavailable, LLM not configured, or parsing fails. Falls back to traditional screener discovery.
+- **Files Modified:** `eventDrivenDiscovery.ts` (new), `db/schema.ts` (columns), `scheduler.ts` (pipeline + discovery), `routes/api.ts` (endpoints).
+- **Quality:** Clean TypeScript build. Zero regressions.
+- **Team Impact:** Malcolm gains richer stock universe reflecting current events. Ellie can display event-driven discoveries in UI. System now dynamically adapts to macro headlines.
+

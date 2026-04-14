@@ -168,5 +168,20 @@ export function initializeSchema(db: Database.Database): void {
     }
   }
 
+  // Add event-driven discovery columns (safe migration)
+  const discoveryColumns = [
+    { name: 'discovery_reason', type: 'TEXT' },
+    { name: 'discovered_at', type: 'TEXT' },
+    { name: 'discovery_event', type: 'TEXT' },
+  ];
+
+  for (const col of discoveryColumns) {
+    try {
+      db.exec(`ALTER TABLE stocks ADD COLUMN ${col.name} ${col.type}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
+
   console.log('[DB] Schema initialised');
 }
