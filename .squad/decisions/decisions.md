@@ -51,3 +51,26 @@ ActivityLog.tsx implements SSE streaming + REST initial fetch + deduplication pa
 StockDetailModal.tsx renders 6 timeframes (1D/1W/1M/3M/1Y/3Y) with interactive multi-chart layout: price/volume, technical indicators (SMA/EMA/RSI/MACD/Bollinger), metrics grid. Recharts `syncId` syncs cursor across charts. Indicator series conditionally rendered per timeframe availability. Clickable symbols throughout Discovery, Portfolio, Dashboard now open modal.
 
 ---
+
+## Trading Engine & Execution
+
+### Trading Threshold Overhaul
+**Date:** 2026-04-17  
+**Contributors:** Malcolm (Data Engineer)  
+**Status:** Implemented
+
+After 10 analysis runs with zero trades, investigation revealed minTradeConfidence threshold (72%) was mathematically unreachable — signal capability maxed at ~55%. Solution: (1) Lower threshold to 0.55 (realistic), (2) Add LLM conviction boost (+15-25% when LLM agrees), (3) Implement tiered position sizing (40% at 55-65% confidence, up to 100% at 85%+), (4) Add soft-buy logic for near-boundary trades. Result: 3 trades executed (MSFT 24@$392, JNJ 40@$240, BAC 182@$53). Tiered sizing manages risk on marginal signals; learning engine ready for feedback-based tuning.
+
+**Files Modified:** `server/src/types.ts`, `server/src/services/scheduler.ts`, `server/src/services/tradingEngine.ts`, `server/src/services/signals/index.ts`
+
+### Event-Driven Stock Discovery
+**Date:** 2026-04-17  
+**Contributors:** Muldoon (Backend Dev)  
+**Status:** Implemented
+
+Added LLM-powered news analysis service to discover stocks aligned with macro events. Pipeline: Finnhub headlines → LLM analysis (geopolitical, policy, sector catalysts, commodity moves) → JSON response parsed for beneficiary stocks/ETFs. Runs every 4 hours integrated into analysis pipeline; adds stocks with discovery_reason, discovery_event, discovered_at metadata. Result: 31 new stocks discovered; 4 macro events identified (OPEC+ cuts → energy beneficiaries, AI chip shortage, interest rate volatility, tech regulation). Graceful fallback if Finnhub/LLM unavailable. Cost: ~0.5¢ per discovery run.
+
+**Files Created:** `server/src/services/eventDrivenDiscovery.ts`  
+**Files Modified:** `server/src/db/schema.ts`, `server/src/services/scheduler.ts`, `server/src/routes/api.ts`
+
+---
