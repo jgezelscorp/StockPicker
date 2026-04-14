@@ -73,3 +73,32 @@
 
 **TypeScript:** All changes compile cleanly with `npx tsc --noEmit`.
 
+### 2026-04-15 — Google Trends Signal Fixed (Score Always 50 Bug)
+
+**Problem:** Google Trends signal was returning a score of exactly 50 (neutral) for almost every stock, adding zero value to analysis. After investigation, found 46 out of 50 recent analyses showed score=50, direction=neutral.
+
+**Root Causes Identified:**
+
+1. **Fallback contamination in avgInterest()**: Line 153 of `googleTrends.ts` returned `50` when no data available, rather than `0`. This meant empty data arrays produced a neutral 50 instead of 0.
+
+2. **API failures returning neutral data**: Only 19 stocks had cached Google Trends data. The remaining stocks hit rate limits, insufficient data, or API failures, triggering the `neutralResult()` fallback which returns `{currentInterest: 50, previousInterest: 50, trend: 'stable', changePercent: 0}`.
+
+3. **Neutral fallback diluted real signals**: When Google Trends failed and returned score=50 with confidence=0.1, the aggregator still gave it full 20% weight in the composite score. This injected a meaningless "50" into the calculation, diluting real signals from valuation, trend, and sentiment.
+
+4. **Low search interest is legitimate data**: Cached data showed many stocks with currentInterest values of 0-20, which is REAL data (minimal search interest), not failures. The 0-100 Google Trends scale is relative to peak interest for that keyword.
+
+**Solution — Three-Part Fix:**
+
+1. **Fixed avgInterest() fallback** (`googleTrends.ts` line 153): Changed `return 50` → `return 0`. Empty data means zero interest, not neutral.
+
+2. **Zero-confidence signals excluded** (`searchInterestSignal.ts` line 79): When searchTrend is null/missing, return confidence=0.0 (not 0.1) to signal "exclude me from scoring."
+
+3. **Dynamic weight redistribution** (`signals/index.ts` lines 216-235 for stocks, 332-351 for ETFs): Filter out signals with confidence < 0.05 BEFORE aggregation. Redistribute their weights proportionally to remaining valid signals. This prevents dead signals from diluting the composite score.
+
+**Impact:** 
+- When Google Trends succeeds: low interest (0-20) scores appropriately bearish/neutral based on actual search data
+- When Google Trends fails: signal is excluded entirely, and its 20% weight redistributes to valuation (35%), trend (25%), and sentiment (20%) → becomes 43.75%, 31.25%, 25% among the 3 valid signals
+- Composite scores now reflect only active, confident signals—no more meaningless 50s contaminating analysis
+
+**TypeScript:** Build passes with `npm run build`. Pre-existing errors in reactiveNewsMonitor.ts are unrelated.
+

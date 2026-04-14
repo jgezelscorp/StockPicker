@@ -72,14 +72,15 @@ export async function analyzeSearchInterest(
 ): Promise<SignalResult> {
   const searchTrend = marketData.searchTrend;
 
-  // Graceful degradation: no search data
+  // Graceful degradation: no search data - return signal with 0 weight
+  // This will cause the aggregator to exclude this signal and redistribute weights
   if (!searchTrend) {
     return {
       source: 'google_trends',
       score: 50,
-      confidence: 0.1,
+      confidence: 0.0,  // Zero confidence means "exclude me from scoring"
       direction: 'neutral',
-      reasoning: 'No search trend data available — returning neutral.',
+      reasoning: 'No search trend data available — signal excluded from analysis.',
       breakdown: { dataAvailable: false },
     };
   }

@@ -212,13 +212,25 @@ export async function analyzeStock(
 
   const signals = await Promise.all(signalPromises);
 
-  // Calculate weighted composite score (0–100)
-  const weightedBreakdown = normalised.map((config, i) => ({
+  // Filter out signals with near-zero confidence (< 0.05) and redistribute weights
+  // This handles cases where data sources fail (e.g., Google Trends rate limits)
+  const validSignals = signals.map((sig, i) => ({ signal: sig, config: normalised[i] }))
+    .filter(({ signal }) => signal.confidence >= 0.05);
+
+  // Redistribute weights among valid signals only
+  const totalValidWeight = validSignals.reduce((s, { config }) => s + config.weight, 0);
+  const redistributed = validSignals.map(({ signal, config }) => ({
+    signal,
+    config: { ...config, weight: config.weight / totalValidWeight },
+  }));
+
+  // Calculate weighted composite score (0–100) using only valid signals
+  const weightedBreakdown = redistributed.map(({ signal, config }) => ({
     source: config.source,
     weight: Math.round(config.weight * 100) / 100,
-    score: signals[i].score,
-    weightedScore: Math.round(signals[i].score * config.weight * 100) / 100,
-    direction: signals[i].direction,
+    score: signal.score,
+    weightedScore: Math.round(signal.score * config.weight * 100) / 100,
+    direction: signal.direction,
   }));
 
   const overallScore = Math.max(0, Math.min(100, Math.round(
@@ -306,13 +318,25 @@ export async function analyzeETF(
 
   const signals = await Promise.all(signalPromises);
 
-  // Calculate weighted composite score (0–100)
-  const weightedBreakdown = normalised.map((config, i) => ({
+  // Filter out signals with near-zero confidence (< 0.05) and redistribute weights
+  // This handles cases where data sources fail (e.g., Google Trends rate limits)
+  const validSignals = signals.map((sig, i) => ({ signal: sig, config: normalised[i] }))
+    .filter(({ signal }) => signal.confidence >= 0.05);
+
+  // Redistribute weights among valid signals only
+  const totalValidWeight = validSignals.reduce((s, { config }) => s + config.weight, 0);
+  const redistributed = validSignals.map(({ signal, config }) => ({
+    signal,
+    config: { ...config, weight: config.weight / totalValidWeight },
+  }));
+
+  // Calculate weighted composite score (0–100) using only valid signals
+  const weightedBreakdown = redistributed.map(({ signal, config }) => ({
     source: config.source,
     weight: Math.round(config.weight * 100) / 100,
-    score: signals[i].score,
-    weightedScore: Math.round(signals[i].score * config.weight * 100) / 100,
-    direction: signals[i].direction,
+    score: signal.score,
+    weightedScore: Math.round(signal.score * config.weight * 100) / 100,
+    direction: signal.direction,
   }));
 
   const overallScore = Math.max(0, Math.min(100, Math.round(

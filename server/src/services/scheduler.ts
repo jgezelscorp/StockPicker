@@ -19,6 +19,7 @@ import { seedInitialUniverse, discoverNewStocks, pruneInactiveStocks } from './s
 import { analyzeWithReasoning, buildEnhancedRationale } from './llm';
 import { logActivity } from './activityLogger';
 import { runEventDrivenDiscovery } from './eventDrivenDiscovery';
+import { monitorNewsAndReact } from './reactiveNewsMonitor';
 
 let activeTasks: cron.ScheduledTask[] = [];
 
@@ -753,6 +754,7 @@ export function startScheduler(config: SchedulerConfig = DEFAULT_SCHEDULER_CONFI
   console.log(`  Snapshots: ${config.snapshotCron}`);
   console.log(`  Learning:  ${config.learningCron}`);
   console.log(`  Discovery: weekly (Sundays at 6 AM)`);
+  console.log(`  Reactive News: every 30 minutes (market hours)`);
 
   // Main analysis pipeline
   const analysisTask = cron.schedule(config.analysisCron, () => {
@@ -778,7 +780,14 @@ export function startScheduler(config: SchedulerConfig = DEFAULT_SCHEDULER_CONFI
     runStockDiscovery().catch(console.error);
   });
 
-  activeTasks = [analysisTask, snapshotTask, learningTask, discoveryTask];
+  // Reactive news monitor — every 30 minutes during market hours (9:30 AM - 4 PM ET, weekdays)
+  // Using UTC times: 9:30 AM ET = 2:30 PM UTC, 4 PM ET = 9 PM UTC
+  const reactiveNewsTask = cron.schedule('*/30 9-21 * * 1-5', () => {
+    console.log('[Scheduler] Running reactive news monitor...');
+    monitorNewsAndReact().catch(console.error);
+  });
+
+  activeTasks = [analysisTask, snapshotTask, learningTask, discoveryTask, reactiveNewsTask];
 
   // Take an initial snapshot on startup
   takePortfolioSnapshot();

@@ -150,7 +150,7 @@ export async function fetchSearchTrend(symbol: string, companyName?: string): Pr
       const currentData = timelineData.slice(midpoint);
 
       const avgInterest = (data: any[]): number => {
-        if (data.length === 0) return 50;
+        if (data.length === 0) return 0;
         const sum = data.reduce((s: number, d: any) => s + (d.value?.[0] ?? 0), 0);
         return Math.round(sum / data.length);
       };

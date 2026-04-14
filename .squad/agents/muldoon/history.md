@@ -142,3 +142,16 @@
 - **Quality:** Clean TypeScript build. Zero regressions.
 - **Team Impact:** Malcolm gains richer stock universe reflecting current events. Ellie can display event-driven discoveries in UI. System now dynamically adapts to macro headlines.
 
+
+### 2026-04-17 — Reactive News Monitor for Instant Trading
+- **New Service:** `server/src/services/reactiveNewsMonitor.ts` — Polls Finnhub general market news every 30 minutes during market hours (9 AM - 9 PM UTC weekdays). Detects high-impact events using LLM classification and triggers immediate targeted analysis + trading on affected stocks.
+- **LLM News Analysis:** Sends recent headlines to Azure OpenAI with portfolio context. LLM classifies impact (CRITICAL/HIGH/MEDIUM/LOW) and identifies buy candidates (stocks that benefit) + sell candidates (portfolio positions at risk). Returns JSON with event summary, candidates, and portfolio risk.
+- **Database Table:** `reactive_events` — tracks detected events with impact level, event summary, news headlines (JSON), buy/sell candidates (JSON), trades executed, timestamps, and duration.
+- **Targeted Analysis:** For CRITICAL/HIGH events, runs fast stock-by-stock analysis using existing `analyzeStock()` pipeline (market data → signals → composite score → confidence). Executes trades via `shouldBuy()`/`shouldSell()` logic with confidence threshold 0.55.
+- **Scheduler Integration:** Added reactive news monitor cron (`*/30 9-21 * * 1-5`) to `scheduler.ts`. Runs in parallel with existing 4-hour analysis, daily snapshots, weekly learning, and weekly discovery.
+- **API Endpoints:** `POST /api/reactive/trigger` (manual trigger for testing), `GET /api/reactive/history` (last 10 events with full details including parsed JSON).
+- **Rationale Tagging:** All reactive trades tagged with `REACTIVE: {event reason}` in the rationale field for clear attribution to news events vs. scheduled analysis.
+- **Key Pattern:** Reuses existing signal analysis, market data fetching, and trading engine — no duplication. Reactive monitor is a thin orchestration layer that identifies WHICH stocks to analyze based on breaking news, then delegates to the proven analysis pipeline.
+- **Graceful Degradation:** If Finnhub API key missing, LLM unavailable, or rate limits hit, monitor logs warning and exits cleanly. Scheduled analysis continues unaffected.
+- **Activity Logging:** All reactive events logged at verbosity 2-3 (Important/Normal) — event detection, LLM impact classification, trades executed, duration. Full LLM prompts at v5 for debugging.
+- **Build Verified:** Clean `tsc --noEmit` compilation. All type conversions (AggregateSignalResult → EvaluationResult, snake_case API fields, logActivity signature) correct.

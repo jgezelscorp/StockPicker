@@ -878,4 +878,43 @@ router.get('/analysis-runs', (_req, res) => {
   }
 });
 
+// ─── Reactive News Monitor ──────────────────────────────────────
+
+router.post('/reactive/trigger', async (_req, res) => {
+  try {
+    const { monitorNewsAndReact } = await import('../services/reactiveNewsMonitor');
+    await monitorNewsAndReact();
+    res.json({ success: true, message: 'Reactive news monitor triggered' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/reactive/history', (_req, res) => {
+  try {
+    const { getReactiveEventHistory } = require('../services/reactiveNewsMonitor');
+    const events = getReactiveEventHistory();
+    res.json({
+      success: true,
+      data: {
+        events: events.map((e: any) => ({
+          id: e.id,
+          impact_level: e.impact_level,
+          event_summary: e.event_summary,
+          news_headlines: JSON.parse(e.news_headlines),
+          buy_candidates: JSON.parse(e.buy_candidates),
+          sell_candidates: JSON.parse(e.sell_candidates),
+          portfolio_risk: e.portfolio_risk,
+          trades_executed: e.trades_executed,
+          detected_at: e.detected_at,
+          processed_at: e.processed_at,
+          duration_ms: e.duration_ms,
+        })),
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 export default router;
