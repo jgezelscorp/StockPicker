@@ -73,4 +73,48 @@ Added LLM-powered news analysis service to discover stocks aligned with macro ev
 **Files Created:** `server/src/services/eventDrivenDiscovery.ts`  
 **Files Modified:** `server/src/db/schema.ts`, `server/src/services/scheduler.ts`, `server/src/routes/api.ts`
 
+### ETF Signal Tuning — Longer-Horizon Analysis
+**Date:** 2026-04-17  
+**Contributors:** Malcolm (Data Engineer)  
+**Status:** Implemented
+
+Retuned all 5 ETF signal analyzers for genuinely longer-term investment horizons per user directive: "ETFs require fundamentally different analysis strategy." Parameter changes across the suite:
+
+| Parameter | Before | After | Rationale |
+|-----------|--------|-------|-----------|
+| Macro half-life | 7d | 18d | Slower signal decay for 6-12mo horizons |
+| Macro keywords | 26 | 54 | Expanded geopolitical/policy coverage |
+| Sector lookback | 20/60d | 40/120/200d | Cascading windows: tactical/medium/structural |
+| Sentiment half-life | 3d | 7d | Dampen daily noise, preserve consensus |
+| Volatility penalty | 10× | 6× | Patient with normal sector dips |
+| Pipeline: Macro weight | 30% | 35% | Dominates ETF decision-making |
+| Pipeline: Search weight | 15% | 10% | Reduced short-term noise |
+| Valuation metrics | P/E, Yield | P/E, P/B, Yield | Added book-value context |
+| Consensus amplification | N/A | +5% boost when 3+ sources align | Amplify institutional signals |
+
+Impact: ETF analysis no longer penalizes for daily volatility; macro signals dominate; sector rotations captured at multiple time horizons.
+
+**Files Modified:** `server/src/services/signals/etfSignals.ts`
+
+### ETF-Specific Trading Rules & Thresholds
+**Date:** 2026-04-17  
+**Contributors:** Muldoon (Backend Dev)  
+**Status:** Implemented
+
+Introduced separate trading thresholds for ETFs vs stocks in trading engine. Both `shouldBuy()` and `shouldSell()` now accept `assetType` parameter and apply different confidence, stop-loss, and holding constraints:
+
+| Parameter | Stock | ETF | Rationale |
+|-----------|-------|-----|-----------|
+| Stop-loss | -8% | -15% | Diversified instruments absorb volatility better |
+| Buy confidence | 55% | 60% | Higher bar to enter larger positions |
+| Sell confidence | 40% | 50% | Need stronger conviction to exit long-horizon vehicles |
+| Protective sell trigger | -0.1 | -0.25 | Mild bearish signals are noise for ETFs |
+| Max position % | 15% | 20% | Lower beta justifies larger allocation |
+| Min holding period | 0d | 14d | Prevent premature exits on short-term noise |
+| Emergency override | -16% (2× stop) | -30% (2× stop) | Force-exit if catastrophic loss despite hold period |
+
+Impact: ETFs no longer sold on same short-term triggers as individual stocks; 14-day minimum hold prevents whipsaws while emergency override prevents holding through true crashes. Trade rationale annotated with `[ETF]` or `[Stock]` tags for audit trail.
+
+**Files Modified:** `server/src/services/tradingEngine.ts`, `server/src/services/scheduler.ts`
+
 ---
