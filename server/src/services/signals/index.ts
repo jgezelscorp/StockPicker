@@ -258,7 +258,7 @@ export async function analyzeAsset(
   marketData: MarketData,
   customWeights?: { source: SignalSource; weight: number }[],
 ): Promise<AggregateSignalResult> {
-  if (stock.assetType === 'etf') {
+  if (stock.asset_type === 'etf' || stock.assetType === 'etf') {
     return analyzeETF(stock, marketData, customWeights);
   }
   return analyzeStock(stock, marketData, customWeights);
