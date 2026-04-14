@@ -664,6 +664,160 @@ This approach doesn't work well for ETFs because:
 
 Created a separate ETF analysis pipeline with fundamentally different signal weights and logic:
 
+---
+
+## Decision: Dynamic Signal Weight Redistribution (2026-04-14)
+
+**Date:** 2026-04-14  
+**Author:** Malcolm (Data Engineer)  
+**Status:** Implemented  
+**Related Files:**
+- `server/src/services/apis/googleTrends.ts`
+- `server/src/services/signals/searchInterestSignal.ts`
+- `server/src/services/signals/index.ts`
+
+### Context: Google Trends Signal Reliability Issue
+
+Google Trends signal was contributing meaningless neutral scores (50) to analysis when:
+- API rate limits hit (very common after 7+ rapid requests)
+- Insufficient data for a stock symbol
+- Network/parse errors
+
+This injected neutral 50s into composite scores even though the signal had effectively failed, diluting the value of working signals (valuation, trend, sentiment).
+
+### Decision: Implement Dynamic Weight Redistribution for Failed Signals
+
+**Changes Made:**
+
+1. **Signals with confidence < 0.05 are now EXCLUDED** from composite score calculation
+2. **Their weights are REDISTRIBUTED PROPORTIONALLY** to remaining valid signals
+3. This applies to both stock and ETF analysis pipelines
+
+### Example
+
+Default stock weights:
+- Valuation: 35%
+- Trend: 25%
+- Sentiment: 20%
+- Google Trends: 20%
+
+When Google Trends fails (confidence=0.0):
+- Valuation: 35% / 0.80 = **43.75%**
+- Trend: 25% / 0.80 = **31.25%**
+- Sentiment: 20% / 0.80 = **25.0%**
+- Google Trends: **excluded**
+
+### Rationale
+
+**Rejected alternatives:**
+- Keep scoring failed signals as 50: Dilutes real data with noise
+- Default confidence to 0.1 instead of 0.0: Still contributes to composite, just weakly
+- Remove Google Trends entirely: Loses valuable signal when it DOES work (low search interest IS meaningful)
+
+**Why this works:**
+- Preserves signal value when data is available (low interest = bearish lean)
+- Eliminates contamination when data fails
+- Generalizes to any future signal source failures
+- Learning engine can still adjust weights for present signals
+
+### Impact
+
+- Composite scores now based only on valid, confident signals
+- When Google Trends works, low interest (0-20) scores appropriately
+- When it fails, analysis doesn't suffer from injected neutrality
+- Future signal additions benefit from same graceful degradation
+
+### Team Notes
+
+This pattern should be used for all future signal integrations. When adding a new signal source:
+1. Return confidence=0.0 when data is unavailable/unreliable
+2. The aggregator will automatically exclude and redistribute weights
+3. Never inject neutral 50s as a "safe default" — exclusion is safer
+
+---
+
+## Decision: Reactive News Monitor Design (2026-04-14)
+
+**Date:** 2026-04-14  
+**Author:** Muldoon (Backend Dev)  
+**Status:** Implemented  
+**Related Files:**
+- `server/src/services/reactiveNewsMonitor.ts` (new)
+- `server/src/services/scheduler.ts`
+- `server/src/services/llm/provider.ts`
+- `server/src/services/tradingEngine.ts`
+- `server/src/routes/api.ts`
+- `server/src/db/schema.ts`
+
+### Context: Event-Driven Trading Opportunity
+
+User wanted the agent to react to breaking news IMMEDIATELY rather than waiting for the next 4-hour analysis cycle. Example: if there's a change in the Iran situation, the agent should instantly analyze and trade affected stocks (oil, defense, airlines, etc.). The existing event-driven discovery only DISCOVERED stocks — it didn't trigger immediate trades.
+
+### Decision: Build Reactive News Monitoring System
+
+Polls Finnhub general market news every 30 minutes, uses LLM to classify impact, and triggers targeted analysis + trading on CRITICAL/HIGH events.
+
+### Key Design Decisions
+
+#### 1. Polling Frequency: Every 30 Minutes
+- **Rationale:** Balances timeliness with API rate limits. More frequent polling would hit Finnhub limits quickly.
+- **Cron:** `*/30 9-21 * * 1-5` — every 30 minutes during market hours (9 AM - 9 PM UTC, weekdays).
+- **Alternative Considered:** Real-time webhooks — not available on Finnhub free tier.
+
+#### 2. LLM-Based Impact Classification
+- **Why:** Keyword matching would miss nuanced events. LLM can understand context (e.g., "Iran tensions escalate" → oil price impact).
+- **Impact Levels:** 
+  - CRITICAL (war, sanctions, major policy) → immediate action
+  - HIGH (earnings surprises, major deals) → quick analysis
+  - MEDIUM/LOW → skip, let normal cycle handle
+- **Output:** JSON with buy candidates, sell candidates, and portfolio risk assessment.
+
+#### 3. Targeted Analysis (Not Full Universe)
+- **Why:** Running full 100+ stock analysis every 30 minutes would be wasteful and expensive (LLM tokens, API calls).
+- **Approach:** LLM identifies 5-10 specific stocks impacted by the event, then we analyze ONLY those stocks.
+- **Example:** "Iran tensions" → analyze XOM, CVX, COP (beneficiaries), TSLA (at risk).
+
+#### 4. Reuse Existing Pipeline (No Duplication)
+- **Why:** The scheduled analysis pipeline is battle-tested (market data → signals → confidence → trading). Don't reinvent the wheel.
+- **Implementation:** Reactive monitor is a thin orchestration layer that calls `analyzeStock()`, `shouldBuy()`, `shouldSell()`, and `executeTrade()` — the same functions used by the 4-hour cycle.
+
+#### 5. Tagging with "REACTIVE:" Prefix
+- **Why:** Clear attribution to news events vs. scheduled analysis. Enables learning engine to evaluate reactive trades separately.
+- **Format:** `REACTIVE: Oil prices surge on Iran tensions. Valuation strong, momentum bullish.`
+
+#### 6. Database Tracking (reactive_events Table)
+- **Why:** Historical record of all events detected, even if no trades executed. Useful for tuning and debugging.
+- **Schema:** impact level, event summary, news headlines (JSON), buy/sell candidates (JSON), trades executed, timestamps.
+
+#### 7. Graceful Degradation
+- **Why:** Reactive monitor is supplementary — scheduled analysis is the core pipeline. If reactive fails (no API key, LLM unavailable, rate limits), the agent continues functioning.
+- **Implementation:** All errors logged as warnings, execution continues.
+
+### Integration Points
+
+- **Scheduler:** Added to `scheduler.ts` as 5th cron task alongside analysis, snapshots, learning, discovery.
+- **API Endpoints:** `POST /api/reactive/trigger` (manual testing), `GET /api/reactive/history` (view past events).
+- **Activity Logging:** All events logged at verbosity 2-3 for monitoring.
+
+### Trade-Offs
+
+- **Latency:** 30-minute polling means we're not INSTANT (could be 0-30 min delay after news breaks). Acceptable given API limits and focus on high-impact events.
+- **LLM Cost:** Every 30-minute poll sends ~30 headlines to LLM (~500 tokens). At gpt-5.4-mini prices, this is negligible.
+- **False Positives:** LLM might flag events that don't materialize. Confidence threshold (0.55) filters out weak signals.
+
+### Future Improvements (Out of Scope)
+
+- **Real-time webhooks:** If Finnhub offers webhooks, switch from polling to push notifications.
+- **Sentiment threshold:** Only trigger if aggregate news sentiment crosses a threshold (e.g., 3+ negative articles on same topic).
+- **Multi-source news:** Add Bloomberg, Reuters, Twitter sentiment for broader coverage.
+
+### Team Impact
+
+- **Malcolm (Signals):** No changes needed — reactive monitor reuses existing signal analyzers.
+- **Ellie (Frontend):** Can add "Reactive Events" section to dashboard showing recent high-impact events and trades executed.
+- **Wu (Testing):** May want to add unit tests for LLM prompt parsing and event detection logic.
+- **Grant (Architecture):** Reactive monitor follows established patterns (graceful degradation, activity logging, snake_case API, etc.).
+
 ### ETF Signal Weights
 | Signal | Weight | Focus |
 |--------|--------|-------|
