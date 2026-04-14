@@ -93,3 +93,14 @@
 - **Files Modified:** signals/index.ts (interface), scheduler.ts (pipeline), reasoningEngine.ts (LLM prompt), routes/api.ts (status).
 - **Team Impact:** Malcolm can optionally use new MarketData fields. Ellie sees alpha_vantage in API status. Wu may want unit tests for rate limiter.
 
+
+### 2026-04-16 — Analysis Runs Observability & Yahoo Finance Extended Fundamentals
+- **Analysis Runs Table & Endpoint:** Added nalysis_runs table in db/schema.ts with run metadata (ID, timestamp, duration_ms, stocks_analyzed, signals_generated, trades_executed, error_count, status). Wired unAnalysisPipeline() to insert on start, update on completion. New GET /api/analysis-runs endpoint returns last 10 runs. Enables backend visibility into pipeline throughput and error patterns.
+- **Extended Fundamentals Migration:** Replaced Alpha Vantage as primary source with Yahoo Finance quoteSummary. New etchExtendedFundamentals() in marketData.ts queries Yahoo v10 API for company fundamentals. Rationale: Yahoo free tier is stable; AV's 5/min and 25/day limits were restrictive for discovery scale.
+- **New Fundamental Fields (7):** MarketData interface extended with: peg_ratio (growth stock valuation), nalyst_target_price (consensus targets), ook_value (P/B context), v_to_revenue (cyclical indicator), v_to_ebitda (asset-heavy context), arnings_quarterly_growth (momentum), operating_margin (efficiency).
+- **Scheduler Updated:** Pipeline now calls etchExtendedFundamentals() instead of Alpha Vantage. All 7 new fields merged into MarketData for signal analyzers. Malcolm's 4-signal model gains richer valuation inputs.
+- **LLM Context:** reasoningEngine.ts system prompt updated to reference new analyst/valuation fields in decision reasoning.
+- **Backward Compatibility:** alphaVantage.ts retained intact for optional use. No breaking changes; existing signals work with partial data.
+- **Files Modified:** db/schema.ts (analysis_runs), scheduler.ts (pipeline + run logging), marketData.ts (fetchExtendedFundamentals), reasoningEngine.ts (prompt), routes/api.ts (endpoint).
+- **Quality:** Clean TypeScript. 82 existing tests passing. Zero regressions.
+- **Team Impact:** Malcolm gains 7 new fields for valuation. Ellie can display analysis run history in ActivityLog. System reduces API dependency concentration.

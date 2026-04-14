@@ -76,3 +76,11 @@
 - **Files:** client/src/pages/Discovery.tsx updated.
 - **Decision captured:** Client-side countdown is hardcoded to 4 hours. Muldoon can later expose next_scheduled_run in API if cron schedule changes.
 
+
+### 2026-04-16 — Recent Analysis Runs Panel & useAnalysisRuns Hook
+- **useAnalysisRuns Hook:** New hook in client/src/hooks/useApi.ts consuming GET /api/analysis-runs endpoint. Auto-refetch interval 30 seconds (consistent with all other hooks). Returns ordered array of last 10 analysis runs with metadata (run ID, started timestamp, duration, stocks, signals, trades, errors, status).
+- **Recent Analysis Runs Panel:** Added collapsible "Recent Analysis Runs" section to ActivityLog.tsx. Renders runs in table format with 8 columns: Run#, Started (locale-formatted timestamp), Duration (ms), Stocks, Signals, Trades, Errors, Status (badge). Rows clickable for future expanded detail view. Loading/empty states handled gracefully.
+- **Integration:** Displays Muldoon's analysis_runs table data in real-time. Provides frontend visibility into pipeline execution health, throughput, and error patterns.
+- **Consistency:** Follows existing hooks pattern. No new dependencies. Placement in ActivityLog alongside verbosity filtering and log stream makes pipeline observability comprehensive.
+- **Quality:** TypeScript clean. Tested with mock data before backend endpoint finalization.
+- **Team Impact:** Jan gains real-time visibility into system execution. Run history enables quick error diagnosis and throughput monitoring.
