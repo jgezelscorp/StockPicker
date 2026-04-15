@@ -85,7 +85,10 @@ const ETF_THRESHOLDS: AssetThresholds = {
   ],
 };
 
-function getThresholds(assetType: string): AssetThresholds {
+export { STOCK_THRESHOLDS, ETF_THRESHOLDS };
+export type { AssetThresholds };
+
+export function getThresholds(assetType: string): AssetThresholds {
   return assetType === 'etf' ? ETF_THRESHOLDS : STOCK_THRESHOLDS;
 }
 

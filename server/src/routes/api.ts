@@ -19,7 +19,8 @@ import {
   calcSMA, calcEMA, calcRSI, calcMACD, calcBollinger, calcATR,
   calcSMASeries, calcEMASeries, calcBollingerSeries, calcRSISeries, calcMACDSeries,
 } from '../services/technicalIndicators';
-import { getPortfolioValue, getCashBalance } from '../services/tradingEngine';
+import { getPortfolioValue, getCashBalance, executeTrade, getThresholds, type TradeOrder } from '../services/tradingEngine';
+import { refreshPositionPrices } from '../services/marketData';
 import {
   runAnalysisPipeline,
   runStockDiscovery,
@@ -50,23 +51,150 @@ router.get('/portfolio', (_req, res) => {
 
 router.get('/portfolio/positions', (_req, res) => {
   try {
+    const db = getDb();
     const p = getPortfolio();
-    res.json({ success: true, data: p.positions.map(pos => ({
-      id: pos.id,
-      stock_id: pos.stockId,
-      symbol: pos.symbol,
-      name: pos.name,
-      market: pos.market,
-      sector: pos.sector,
-      quantity: pos.quantity,
-      average_cost: pos.averageCost,
-      current_price: pos.currentPrice,
-      market_value: pos.marketValue,
-      unrealised_pnl: pos.unrealisedPnl,
-      unrealised_pnl_pct: pos.unrealisedPnlPct,
-      opened_at: pos.openedAt,
-      updated_at: pos.updatedAt,
-    }))});
+
+    // Fetch asset_type for each position's stock
+    const assetTypes = new Map<number, string>();
+    const stockRows = db.prepare(
+      'SELECT id, asset_type FROM stocks WHERE id IN (' +
+      p.positions.map(() => '?').join(',') + ')'
+    ).all(...p.positions.map(pos => pos.stockId)) as any[];
+    for (const row of stockRows) {
+      assetTypes.set(row.id, row.asset_type || 'stock');
+    }
+
+    const now = Date.now();
+
+    res.json({ success: true, data: p.positions.map(pos => {
+      const assetType = assetTypes.get(pos.stockId) || 'stock';
+      const thresholds = getThresholds(assetType);
+      const daysHeld = Math.floor((now - new Date(pos.openedAt).getTime()) / (1000 * 60 * 60 * 24));
+
+      return {
+        id: pos.id,
+        stock_id: pos.stockId,
+        symbol: pos.symbol,
+        name: pos.name,
+        market: pos.market,
+        sector: pos.sector,
+        quantity: pos.quantity,
+        average_cost: pos.averageCost,
+        current_price: pos.currentPrice,
+        market_value: pos.marketValue,
+        unrealised_pnl: pos.unrealisedPnl,
+        unrealised_pnl_pct: pos.unrealisedPnlPct,
+        opened_at: pos.openedAt,
+        updated_at: pos.updatedAt,
+        strategy: {
+          asset_type: assetType,
+          stop_loss_pct: thresholds.stopLossPct,
+          stop_loss_price: Number((pos.averageCost * (1 + thresholds.stopLossPct / 100)).toFixed(2)),
+          take_profit_target: null,
+          min_holding_days: thresholds.minHoldingDays,
+          days_held: daysHeld,
+          in_holding_period: daysHeld < thresholds.minHoldingDays,
+          sell_confidence_threshold: thresholds.sellConfidenceThreshold,
+          max_position_pct: thresholds.maxPositionPct,
+          strategy_note: assetType === 'etf'
+            ? `ETF: ${thresholds.stopLossPct}% stop-loss, ${thresholds.minHoldingDays}-day min hold, sell on bearish signal ≥${(thresholds.sellConfidenceThreshold * 100).toFixed(0)}% confidence`
+            : `Stock: ${thresholds.stopLossPct}% stop-loss, sell on bearish signal ≥${(thresholds.sellConfidenceThreshold * 100).toFixed(0)}% confidence`,
+        },
+      };
+    })});
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/portfolio/sell', (req, res) => {
+  try {
+    const { symbol, quantity, price } = req.body;
+
+    // Validate inputs
+    if (!symbol || typeof symbol !== 'string') {
+      res.status(400).json({ success: false, error: 'symbol is required and must be a string' });
+      return;
+    }
+    if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) {
+      res.status(400).json({ success: false, error: 'quantity must be a positive number' });
+      return;
+    }
+    if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
+      res.status(400).json({ success: false, error: 'price must be a positive number' });
+      return;
+    }
+
+    const db = getDb();
+
+    // Look up position joined with stocks
+    const position = db.prepare(`
+      SELECT pp.*, s.id as sid, s.symbol, s.name as stock_name
+      FROM portfolio_positions pp
+      JOIN stocks s ON s.id = pp.stock_id
+      WHERE UPPER(s.symbol) = UPPER(?) AND pp.quantity > 0
+    `).get(symbol) as any;
+
+    if (!position) {
+      res.status(404).json({ success: false, error: `No open position found for symbol ${symbol.toUpperCase()}` });
+      return;
+    }
+
+    if (quantity > position.quantity) {
+      res.status(400).json({
+        success: false,
+        error: `Cannot sell ${quantity} shares — only ${position.quantity} held`,
+      });
+      return;
+    }
+
+    const order: TradeOrder = {
+      stockId: position.stock_id,
+      symbol: position.symbol,
+      action: 'sell',
+      quantity,
+      pricePerShare: price,
+      confidence: 1.0,
+      rationale: `Manual sell by user: ${quantity} shares @ $${price}`,
+      signalSnapshot: JSON.stringify({ manual: true, user_initiated: true }),
+    };
+
+    const tradeId = executeTrade(order);
+
+    // Fetch updated position
+    const updated = db.prepare(`
+      SELECT pp.*, s.symbol, s.name as stock_name
+      FROM portfolio_positions pp
+      JOIN stocks s ON s.id = pp.stock_id
+      WHERE pp.stock_id = ?
+    `).get(position.stock_id) as any;
+
+    res.json({
+      success: true,
+      data: {
+        trade_id: tradeId,
+        symbol: position.symbol,
+        quantity_sold: quantity,
+        price_per_share: price,
+        total_value: Number((quantity * price).toFixed(2)),
+        remaining_quantity: updated ? updated.quantity : 0,
+        position: updated && updated.quantity > 0 ? {
+          quantity: updated.quantity,
+          average_cost: updated.average_cost,
+          market_value: updated.market_value,
+          unrealised_pnl: updated.unrealised_pnl,
+        } : null,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/portfolio/refresh-prices', async (_req, res) => {
+  try {
+    const updated = await refreshPositionPrices();
+    res.json({ success: true, updated });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

@@ -58,6 +58,17 @@ export const api = {
   getStockDetail: (symbolOrId: string | number) =>
     request<any>(`/stocks/${symbolOrId}/detail`),
 
+  // Sell Position
+  sellPosition: (symbol: string, quantity: number, price: number) =>
+    request<any>('/portfolio/sell', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, quantity, price }),
+    }),
+
+  // Refresh Prices
+  refreshPrices: () =>
+    request<any>('/portfolio/refresh-prices', { method: 'POST' }),
+
   // Cash Adjustment
   adjustCash: (amount: number, reason?: string) =>
     request<any>('/portfolio/adjust-cash', {

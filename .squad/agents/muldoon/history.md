@@ -150,6 +150,13 @@
 - **Targeted Analysis:** For CRITICAL/HIGH events, runs fast stock-by-stock analysis using existing `analyzeStock()` pipeline (market data → signals → composite score → confidence). Executes trades via `shouldBuy()`/`shouldSell()` logic with confidence threshold 0.55.
 - **Scheduler Integration:** Added reactive news monitor cron (`*/30 9-21 * * 1-5`) to `scheduler.ts`. Runs in parallel with existing 4-hour analysis, daily snapshots, weekly learning, and weekly discovery.
 - **API Endpoints:** `POST /api/reactive/trigger` (manual trigger for testing), `GET /api/reactive/history` (last 10 events with full details including parsed JSON).
+
+### 2026-07-05 — Portfolio Feature: Manual Sell, Refresh Prices, Strategy Info
+- **POST /api/portfolio/sell:** Manual sell endpoint. Validates symbol exists in open positions, checks quantity ≤ held, price > 0. Builds a `TradeOrder` with confidence 1.0 and `manual: true` signal snapshot, delegates to `executeTrade()`. Returns trade_id + updated position info.
+- **POST /api/portfolio/refresh-prices:** Thin wrapper exposing `refreshPositionPrices()` from marketData.ts. Returns `{ success, updated: N }`.
+- **GET /portfolio/positions enhanced:** Now includes `strategy` object per position with stop-loss price, holding period info, sell confidence threshold, and strategy note. Uses asset_type from stocks table to pick stock vs ETF thresholds.
+- **Exported from tradingEngine.ts:** `STOCK_THRESHOLDS`, `ETF_THRESHOLDS`, `AssetThresholds` type, and `getThresholds()` function — previously module-private. Needed by the positions endpoint for strategy calculations.
+- **Pattern:** Manual trades use confidence 1.0 and a descriptive rationale — distinguishes them from autonomous trades in the trade log.
 - **Rationale Tagging:** All reactive trades tagged with `REACTIVE: {event reason}` in the rationale field for clear attribution to news events vs. scheduled analysis.
 - **Key Pattern:** Reuses existing signal analysis, market data fetching, and trading engine — no duplication. Reactive monitor is a thin orchestration layer that identifies WHICH stocks to analyze based on breaking news, then delegates to the proven analysis pipeline.
 - **Graceful Degradation:** If Finnhub API key missing, LLM unavailable, or rate limits hit, monitor logs warning and exits cleanly. Scheduled analysis continues unaffected.

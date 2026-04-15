@@ -94,3 +94,11 @@
 - **Recently Discovered Section:** Added "Type" column with colored badges (cyan for stocks, orange for ETFs) to distinguish asset types at a glance.
 - **All Functionality Preserved:** Search, sort, filter, click-to-detail modal, analyze buttons, remove actions, discovery/analysis pipeline triggers all work identically on both tabs.
 - **No Dependencies Added:** Pure React state management with `useState<TabType>` and `useMemo` for filtered arrays. TypeScript compiles clean. Vite hot-reload works on port 5174.
+
+### 2026-04-17 — Portfolio Page: Four UI Improvements
+- **Bug fix — stock name field:** `p.stock_name` → `p.name` to match actual API response shape from Muldoon's `/portfolio/positions` endpoint.
+- **Sell modal:** Full modal overlay with position info summary, validated qty/price inputs, sell summary line, loading/error states, and query invalidation on success. Pattern matches existing StockDetailModal overlay approach.
+- **Strategy + stop-loss columns:** Two new columns display Muldoon's per-position strategy data (stop-loss %, badge, price) and a color-coded risk indicator (Safe/Watch/Danger/TRIGGERED with flashing animation). Gracefully handles undefined strategy for backward compat.
+- **Price refresh on mount:** `useEffect` fires `refreshPrices.mutate()` on Portfolio mount. Success invalidates positions + dashboard queries. Shows subtle "Refreshing prices…" text; failures are silent.
+- **API layer:** Added `sellPosition()` and `refreshPrices()` to client.ts. Added `useSellPosition` and `useRefreshPrices` mutation hooks to useApi.ts with proper query invalidation.
+- **No new dependencies.** TypeScript compiles clean. All inline styles using CSS variables.

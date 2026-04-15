@@ -145,6 +145,31 @@ export function useStockDetail(symbolOrId: string | number | null) {
   });
 }
 
+export function useSellPosition() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbol, quantity, price }: { symbol: string; quantity: number; price: number }) =>
+      api.sellPosition(symbol, quantity, price),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['positions'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+      qc.invalidateQueries({ queryKey: ['portfolio-history'] });
+      qc.invalidateQueries({ queryKey: ['trades'] });
+    },
+  });
+}
+
+export function useRefreshPrices() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.refreshPrices,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['positions'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 export function useAdjustCash() {
   const qc = useQueryClient();
   return useMutation({
