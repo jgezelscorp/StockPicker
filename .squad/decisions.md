@@ -777,6 +777,91 @@ Polls Finnhub general market news every 30 minutes, uses LLM to classify impact,
 - **Approach:** LLM identifies 5-10 specific stocks impacted by the event, then we analyze ONLY those stocks.
 - **Example:** "Iran tensions" → analyze XOM, CVX, COP (beneficiaries), TSLA (at risk).
 
+---
+
+## 2026-04-14T2032: User Directive — ETF Analysis Strategy
+
+**Author:** Jan G. (via Copilot)  
+**Status:** Accepted  
+
+### Decision: Differentiate ETF Analysis from Stock Analysis
+
+ETFs require a fundamentally different analysis strategy than stocks. The agent must NOT treat them the same.
+
+**Key Differences:**
+- **Investment Horizon:** Longer-term (avoid day-trading volatility)
+- **Analysis Weight:** Heavier emphasis on macro/geopolitics, sector composition, long-term trends
+- **Data Sources:** 
+  - Longer-term Google Trends (weeks/months, not days)
+  - News impact on underlying holdings, not the ETF ticker itself
+  - Sector composition changes and rebalancing events
+- **Exit Strategy:** Lower sensitivity to short-term confidence drops; focus on macro thesis breaks
+
+**Team Impact:**
+- **Malcolm:** Update TradingEngine thresholds for ETF vs stock exit rules
+- **Signal Collector:** Adjust macro trends and news interpretation for ETF holdings
+- **Analysis:** Separate scoring models for stock vs ETF recommendations
+
+---
+
+## 2026-04-17: Portfolio Page Sell + Strategy UI
+
+**Author:** Ellie (Frontend) + Muldoon (Backend)  
+**Date:** 2026-04-17  
+**Status:** Implemented  
+
+### Context
+
+Jan requested four Portfolio page improvements:
+1. Fix stock name field (`stock_name` → `name`)
+2. Add sell modal with manual trade capability
+3. Display strategy and stop-loss status
+4. Auto-refresh prices on page load
+
+### Decisions
+
+1. **Sell Modal Uses `POST /api/portfolio/sell`**
+   - Body: `{ symbol, quantity, price }`
+   - Implementation: Muldoon uses `executeTrade()` with confidence 1.0, signal snapshot `{ manual: true, user_initiated: true }`
+   - Frontend invalidates: `positions`, `dashboard`, `portfolio-history`, `trades` queries
+
+2. **Strategy Object on Each Position**
+   - Fields: `asset_type`, `stop_loss_pct`, `stop_loss_price`, `min_holding_days`, strategy note
+   - Ellie: Columns render nothing if `strategy` undefined (safe backward compat)
+   - Muldoon: Stock vs ETF asset-specific data from tradingEngine
+
+3. **Price Refresh Endpoint: `POST /api/portfolio/refresh-prices`**
+   - Exposes existing `refreshPositionPrices()` via API
+   - Fires once on Portfolio mount (silent failure, background enhancement)
+
+4. **Stop-Loss Status Thresholds** (Frontend Display)
+   - **Safe:** P&L > 0%
+   - **Watch:** 0% to 50% of stop-loss price
+   - **Danger:** 50% to stop-loss price
+   - **TRIGGERED:** At or past stop-loss
+   - Note: Actual sell trigger logic lives in Malcolm's strategy engine
+
+### Implementation
+
+**Backend (Muldoon):**
+- `POST /api/portfolio/sell` in server/src/routes/api.ts
+- `POST /api/portfolio/refresh-prices` in server/src/routes/api.ts
+- Enhanced `GET /portfolio/positions` returns `strategy` object
+- Exported `STOCK_THRESHOLDS`, `ETF_THRESHOLDS`, `getThresholds()`, `AssetThresholds` from tradingEngine.ts
+
+**Frontend (Ellie):**
+- Fixed `stock_name` → `name` mapping in client/src/pages/Portfolio.tsx and client/src/api/client.ts
+- Sell modal with validation in client/src/pages/Portfolio.tsx and client/src/hooks/useApi.ts
+- Strategy + stop-loss columns render thresholds and status
+- Auto price refresh on Portfolio mount
+
+### Team Impact
+- **Muldoon:** Backend ready for frontend consumption
+- **Ellie:** API contracts and endpoints ready to integrate
+- **Wu:** New endpoints need test coverage
+- **Malcolm:** No changes — thresholds are read-only exports
+- **Jan:** Portfolio page now supports manual sells and strategy visibility
+
 #### 4. Reuse Existing Pipeline (No Duplication)
 - **Why:** The scheduled analysis pipeline is battle-tested (market data → signals → confidence → trading). Don't reinvent the wheel.
 - **Implementation:** Reactive monitor is a thin orchestration layer that calls `analyzeStock()`, `shouldBuy()`, `shouldSell()`, and `executeTrade()` — the same functions used by the 4-hour cycle.
