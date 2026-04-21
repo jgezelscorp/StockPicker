@@ -102,6 +102,38 @@
 
 **TypeScript:** Build passes with `npm run build`. Pre-existing errors in reactiveNewsMonitor.ts are unrelated.
 
+### 2026-04-16 — Analysis Pane Missing Endpoints Fix
+
+**Problem:** The Analysis & Learning page showed no data — all three panels (performance metrics, analysis table, learning insights) were empty.
+
+**Root Cause:** Frontend client (`client/src/api/client.ts`) calls three endpoints that didn't exist in the API router:
+- `GET /api/analysis` — analysis_logs listing (table of recent analyses)
+- `GET /api/performance` — portfolio performance metrics (return, win rate, profit factor)
+- `GET /api/learning` — learning outcomes (evaluated trades with accuracy data)
+
+The server had `/api/analysis/performance` and `/api/analysis/decisions` but no bare `/api/analysis`, `/api/performance`, or `/api/learning`. Frontend was hitting 404s silently (react-query swallows errors by default).
+
+**Fix:** Added 4 missing endpoints to `server/src/routes/api.ts` (lines 404–462):
+1. `GET /analysis` — returns latest 50 analysis_logs joined with stock symbols
+2. `GET /performance` — proxies to `getPerformanceMetrics()`
+3. `GET /learning` — returns learning_outcomes joined with trade + stock data
+4. `GET /health` — basic health check (was also missing)
+
+**Key lesson:** When Muldoon builds API routes and Ellie builds frontend hooks, verify the URL paths match exactly. This was a classic contract mismatch — both sides worked in isolation but the paths diverged.
+
+**TypeScript:** `npx tsc --noEmit` passes cleanly in server workspace.
+
+### 2026-04-21 — Analysis Pane Integration Completion (with Ellie)
+
+**Session:** Investigated & fixed silent failures in Analysis & Learning page.
+
+**Work Done:**
+- **Confirmed API routes exist** and return correct response shapes (analysis_logs, performance metrics, learning outcomes).
+- **Coordinated with Ellie** on frontend error handling — discovered that page had zero loading indicators and zero error messages during fetch, making silent failures look like broken UI.
+- **Learning:** Frontend + backend integration requires explicit contract verification. Unit tests pass in isolation; integration contracts catch mismatches early. Both analytics pane routes and error state rendering now working end-to-end.
+
+**Files:** Analysis page routes in `server/src/routes/api.ts`; error boundaries in `client/src/pages/Analysis.tsx`.
+
 ### 2026-04-15 — ETF Longer-Horizon Tuning
 
 **User directive:** ETFs need genuinely longer-term analysis — not the same treatment as stocks.

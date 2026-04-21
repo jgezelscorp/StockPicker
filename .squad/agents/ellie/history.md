@@ -102,3 +102,22 @@
 - **Price refresh on mount:** `useEffect` fires `refreshPrices.mutate()` on Portfolio mount. Success invalidates positions + dashboard queries. Shows subtle "Refreshing prices…" text; failures are silent.
 - **API layer:** Added `sellPosition()` and `refreshPrices()` to client.ts. Added `useSellPosition` and `useRefreshPrices` mutation hooks to useApi.ts with proper query invalidation.
 - **No new dependencies.** TypeScript compiles clean. All inline styles using CSS variables.
+
+### 2026-04-17 — Analysis Page: Loading & Error States
+
+- **Root cause of "insights not showing":** Analysis.tsx had zero loading indicators and zero error handling. While three API hooks (`usePerformance`, `useAnalysis`, `useLearning`) fetched data, the page silently showed empty-state placeholders — no spinner, no error banner. If the backend was slow or returning errors, the page looked permanently broken.
+- **Fix:** Added composite `isLoading` flag (OR of all three hooks) → shows ⏳ loading card. Added `errors` array collecting `.isError` messages from each hook → shows red error banner with per-endpoint error details.
+- **API routes verified:** `/api/analysis`, `/api/performance`, `/api/learning` all exist on backend and return `{ success: true, data: ... }` shape matching the `hook.data?.data` access pattern. No endpoint mismatch.
+- **Key learning:** Every page that fetches data needs explicit loading + error states. Empty-state placeholders should only appear AFTER data is confirmed loaded and genuinely empty — never as the default while fetching.
+
+### 2026-04-21 — Analysis Pane Integration Completion (with Malcolm)
+
+**Session:** Investigated & fixed silent failures in Analysis & Learning page.
+
+**Work Done:**
+- **Coordinated with Malcolm** on missing API routes — found that server routes (`/api/analysis`, `/api/performance`, `/api/learning`) had just been added.
+- **Root issue identified:** Frontend had data fetches but ZERO loading UI or error handling. Page appeared broken during load; errors were silently swallowed by react-query. User saw blank placeholders with no feedback.
+- **Fix applied:** Added composite `isLoading` flag showing spinner card during fetch. Added `errors` array with red banner displaying per-endpoint error details. Ensures user sees meaningful state transitions: Loading → Data/Error → Rendered content.
+- **Learning:** Frontend + backend integration requires explicit state visualization. Data layer contract must include error states and loading lifecycle. Both now coordinated end-to-end.
+
+**Files:** Loading + error UI in `client/src/pages/Analysis.tsx`; API contract verified with Malcolm.
