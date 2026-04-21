@@ -1216,3 +1216,64 @@ Code is clean and modular — rollback would be <10 lines.
 
 **Confidence:** High — build passes, dev server runs, no TypeScript errors, follows existing patterns.
 
+---
+
+# Decision: Analysis Page API Contract Fix
+
+**Author:** Malcolm (Data Engineer)
+**Date:** 2026-04-16
+**Status:** Implemented
+**Requested by:** Jan G.
+
+## Context
+The Analysis & Learning page was showing no data. Root cause: frontend called `GET /analysis`, `GET /performance`, and `GET /learning` but the API router only had `/analysis/performance` and `/analysis/decisions`. Classic path mismatch between frontend and backend.
+
+## Decision
+Added the 3 missing endpoints (`/analysis`, `/performance`, `/learning`) plus `/health` to `server/src/routes/api.ts`.
+
+## Team Note
+When adding new frontend pages, verify the exact API paths in `client/src/api/client.ts` match routes in `server/src/routes/api.ts`. Consider a shared route constants file to prevent future mismatches.
+
+---
+
+# Decision: Learning Data Seeding Infrastructure
+
+**Author:** Malcolm (Data Engineer) + Ellie (Frontend Dev)
+**Date:** 2026-04-21
+**Status:** Implemented
+**Requested by:** Jan G.
+**Topic:** Seeding learning data for Analysis page controls
+
+## Context
+The Analysis page needed a way for users to generate sample learning outcomes for testing and to trigger the learning evaluation engine. This required both backend endpoints and frontend UI controls.
+
+## Changes
+
+### Backend Endpoints (Malcolm)
+1. **POST /api/learning/seed**
+   - Inserts 18 realistic learning outcomes into `learning_outcomes` table
+   - Each outcome links a past decision (prediction) to an actual result
+   - Supports testing of the Analysis page learning section
+   - Returns success/count response
+
+2. **POST /api/learning/evaluate**
+   - Calls internal `evaluatePastDecisions()` business logic
+   - Triggers weekly learning evaluation cycle on-demand
+   - Processes closed positions not yet evaluated
+   - Returns updated metrics
+
+### Frontend Toolbar (Ellie)
+- Added conditional dev toolbar to Analysis.tsx (only shows when learning data is empty)
+- **"Seed Sample Data"** button → calls `/api/learning/seed`
+- **"Run Learning Evaluation"** button → calls `/api/learning/evaluate`
+- Calls `learning.refetch()` after each action to refresh UI with new data
+
+## Impact
+- Both endpoints compile clean and integrate with existing learning engine
+- Reduces manual testing time for learning workflows
+- Toolbar provides clear UX for dev/demo scenarios
+
+## Team Notes
+- Remove toolbar before production if desired (it only renders in dev when data is empty)
+- Can be extended to offer different seed datasets or evaluation options in future
+
