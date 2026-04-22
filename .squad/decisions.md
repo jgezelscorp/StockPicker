@@ -15,6 +15,32 @@ Every code change MUST go through proper GitHub workflow:
 6. **Pending:** Remote origin needs to be configured (`git remote add origin <url>`)
 
 
+
+### Remove Trailing Slash from API_URL (2026-01-24)
+
+**By:** Muldoon (Backend Dev)
+**Status:** Implemented
+
+#### Problem
+The deployed application returned 404 errors for all API routes due to a trailing slash in the apiUrl parameter in infra/main.bicep line 78. The trailing / caused nginx's proxy_pass directive to strip the /api/ prefix from all backend requests.
+
+#### Decision
+Remove the trailing slash from API_URL in infra/main.bicep:
+`icep
+apiUrl: 'http://${containerAppApi.outputs.fqdn}'
+`
+
+#### Consequences
+- All API routes now work correctly in production
+- Nginx configuration remains simple without URI rewrites
+- Key learning: omit trailing slashes in nginx proxy_pass unless explicitly manipulating paths
+
+#### Implementation
+- Fixed: infra/main.bicep line 78
+- Committed: 0410b91
+- Deployed: Pushed to main
+
+
 ### APEX System Architecture (2026-01-20)
 
 **Author:** Grant (Lead / Architect)  
@@ -3262,3 +3288,4 @@ When Jan G. grants the service principal **Owner** or **User Access Administrato
 - **Client URL:** https://apex-client.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
 - **API FQDN:** apex-api.internal.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
 - **Status:** ✅ LIVE
+
