@@ -39,7 +39,7 @@ jobs:
               environmentName=apex \
               imageTag=${{ github.sha }} \
               finnhubApiKey=${{ secrets.FINNHUB_API_KEY }} \
-              alphaVantageApiKey=${{ secrets.ALPHA_VANTAGE_MCP_API_KEY }} \
+              alphaVantageApiKey="${{ secrets.ALPHA_VANTAGE_MCP_API_KEY || 'not-configured' }}" \
               azureOpenaiApiKey=${{ secrets.AZURE_OPENAI_API_KEY }} \
               azureOpenaiEndpoint=${{ secrets.AZURE_OPENAI_ENDPOINT }} \
               azureOpenaiDeployment=${{ secrets.AZURE_OPENAI_DEPLOYMENT }} \

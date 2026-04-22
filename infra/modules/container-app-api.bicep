@@ -69,7 +69,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
         {
           name: 'alpha-vantage-api-key'
-          value: alphaVantageApiKey
+          value: !empty(alphaVantageApiKey) ? alphaVantageApiKey : 'not-configured'
         }
         {
           name: 'azure-openai-api-key'
