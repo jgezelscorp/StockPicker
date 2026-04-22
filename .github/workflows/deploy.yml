@@ -1,0 +1,83 @@
+name: Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.squad/**'
+      - '*.md'
+      - '.gitignore'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy infrastructure
+        id: infra
+        run: |
+          az deployment group create \
+            --resource-group ${{ secrets.AZURE_RG }} \
+            --template-file infra/main.bicep \
+            --parameters \
+              environmentName=apex \
+              imageTag=${{ github.sha }} \
+              finnhubApiKey=${{ secrets.FINNHUB_API_KEY }} \
+              openaiApiKey=${{ secrets.OPENAI_API_KEY }} \
+            --query "properties.outputs" \
+            --output json > deploy-outputs.json
+
+          ACR_LOGIN_SERVER=$(jq -r '.acrLoginServer.value' deploy-outputs.json)
+          echo "acrLoginServer=${ACR_LOGIN_SERVER}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to ACR
+        run: az acr login --name $(echo "${{ steps.infra.outputs.acrLoginServer }}" | cut -d'.' -f1)
+
+      - name: Build and push API image
+        run: |
+          docker build -f Dockerfile.api \
+            -t ${{ steps.infra.outputs.acrLoginServer }}/apex-api:${{ github.sha }} \
+            .
+          docker push ${{ steps.infra.outputs.acrLoginServer }}/apex-api:${{ github.sha }}
+
+      - name: Build and push Client image
+        run: |
+          docker build -f Dockerfile.client \
+            -t ${{ steps.infra.outputs.acrLoginServer }}/apex-client:${{ github.sha }} \
+            .
+          docker push ${{ steps.infra.outputs.acrLoginServer }}/apex-client:${{ github.sha }}
+
+      - name: Update API container app
+        run: |
+          az containerapp update \
+            --name apex-api \
+            --resource-group ${{ secrets.AZURE_RG }} \
+            --image ${{ steps.infra.outputs.acrLoginServer }}/apex-api:${{ github.sha }}
+
+      - name: Update Client container app
+        run: |
+          az containerapp update \
+            --name apex-client \
+            --resource-group ${{ secrets.AZURE_RG }} \
+            --image ${{ steps.infra.outputs.acrLoginServer }}/apex-client:${{ github.sha }}
+
+      - name: Display deployment URLs
+        run: |
+          echo "🚀 Deployment complete!"
+          echo "API Internal FQDN: $(jq -r '.apiUrl.value' deploy-outputs.json)"
+          echo "Client URL: https://$(jq -r '.clientUrl.value' deploy-outputs.json)"

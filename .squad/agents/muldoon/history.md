@@ -19,6 +19,13 @@ Key decisions merged into `.squad/decisions.md`.
 
 ## Learnings
 
+### 2025-07-25 — Branch Protection Configuration (BLOCKED — re-confirmed 2025-07-25)
+- Attempted to configure branch protection on `master` and `main` branches of `jgezelscorp/Apex` via both the rulesets API and classic branch protection API.
+- Desired rules: require 1 PR approval, dismiss stale reviews, admin-only bypass.
+- **Blocked**: The authenticated GitHub account (`jangezels_microsoft`) has only **pull** (read) permission on the `jgezelscorp/Apex` repo. Both APIs return 404 without admin access.
+- Remote branches confirmed: `main`, `master`, `dependabot/npm_and_yarn/basic-ftp-5.2.2`.
+- **Resolution needed**: Jan G. must either (a) grant admin/write rights to `jangezels_microsoft` on the `jgezelscorp/Apex` repo, or (b) configure branch protection directly via GitHub Settings → Branches → Add rule, targeting `master` and `main` with: require PR reviews (1 approval), dismiss stale reviews on push, do not allow bypassing.
+
 ### 2025-01-20 — Core Backend Services Implementation
 - Created `marketData.ts`: Yahoo Finance v8 API integration with SQLite caching, rate limiting (200ms throttle), support for US/EU/ASIA markets via index symbols. Cache TTL: 5min for quotes, 60min for historical.
 - Created `tradingEngine.ts`: Full conviction-based trading engine. Signals aggregated via weighted average; confidence derived from signal agreement (1 – stddev). Buy threshold 72%, sell triggers: confidence < 40% on bearish lean or –8% stop-loss. Position sizing: max 15% portfolio per stock, max 20 positions, 10% cash reserve.
@@ -193,3 +200,13 @@ Key decisions merged into `.squad/decisions.md`.
 - **Pattern:** All thresholds logged in trade rationale with `[ETF]`/`[Stock]` tags for audit trail.
 - **Key Files:** `server/src/services/tradingEngine.ts` (thresholds + decision logic), `server/src/services/scheduler.ts` (pass-through).
 - **Build Verified:** Clean `tsc --noEmit`.
+
+### 2025-07-25 — Azure Container Apps Deployment Pipeline
+- **Architecture:** Two-container deployment on Azure Container Apps. `apex-client` (Nginx, external ingress, port 80) reverse-proxies `/api/*` to `apex-api` (Node.js, internal ingress, port 3001). Single public endpoint, no CORS.
+- **Dockerfiles:** `Dockerfile.client` (multi-stage: node build → nginx) and `Dockerfile.api` (multi-stage: node build → production with better-sqlite3 native rebuild). Both at repo root.
+- **Nginx config:** `nginx/nginx.conf.template` uses envsubst (built into nginx Docker image) to template `${API_URL}` at startup. Gzip enabled, SPA fallback, static asset caching.
+- **Bicep infra:** `infra/main.bicep` orchestrates 4 modules: container-apps-env (Log Analytics + CAE), acr (registry + managed identity), container-app-api, container-app-client. Managed identity for ACR pull, no admin creds.
+- **CI/CD:** `.github/workflows/deploy.yml` — OIDC login, build+push both images tagged with git SHA, deploy Bicep, update container apps. Triggers on push to main (excludes .squad/ and .md files).
+- **SQLite caveat:** EmptyDir volume is ephemeral. Single API replica enforced (SQLite = single writer). Future: migrate to Azure File Share or Azure SQL for durability.
+- **Secrets:** FINNHUB_API_KEY and OPENAI_API_KEY passed as Container Apps secrets via Bicep secure params. Azure auth via OIDC federated credentials.
+- **Key files:** `Dockerfile.client`, `Dockerfile.api`, `nginx/nginx.conf.template`, `infra/main.bicep`, `infra/modules/*.bicep`, `.github/workflows/deploy.yml`.

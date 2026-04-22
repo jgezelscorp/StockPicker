@@ -1,0 +1,44 @@
+# Stage 1: Install dependencies
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY shared/package.json shared/
+COPY server/package.json server/
+COPY client/package.json client/
+RUN npm ci
+
+# Stage 2: Build shared + server
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/shared/node_modules ./shared/node_modules
+COPY --from=deps /app/server/node_modules ./server/node_modules
+COPY package.json package-lock.json tsconfig.json ./
+COPY shared/ shared/
+COPY server/ server/
+RUN npm run build --workspace=shared && npm run build --workspace=server
+
+# Stage 3: Production image
+FROM node:20-alpine AS production
+RUN apk add --no-cache python3 make g++
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY shared/package.json shared/
+COPY server/package.json server/
+COPY client/package.json client/
+RUN npm ci --omit=dev && npm rebuild better-sqlite3
+
+COPY --from=build /app/shared/dist ./shared/dist
+COPY --from=build /app/server/dist ./server/dist
+COPY shared/package.json shared/
+COPY server/package.json server/
+
+RUN mkdir -p /data
+
+ENV NODE_ENV=production
+ENV PORT=3001
+ENV DB_PATH=/data/apex.db
+EXPOSE 3001
+
+CMD ["node", "server/dist/index.js"]
