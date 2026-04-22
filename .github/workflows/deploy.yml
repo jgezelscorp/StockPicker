@@ -29,7 +29,37 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy infrastructure
+      - name: Deploy foundation (ACR + Environment)
+        id: foundation
+        run: |
+          az deployment group create \
+            --resource-group ${{ secrets.AZURE_RG }} \
+            --template-file infra/foundation.bicep \
+            --parameters environmentName=apex \
+            --query "properties.outputs" \
+            --output json > foundation-outputs.json
+
+          ACR_LOGIN_SERVER=$(jq -r '.acrLoginServer.value' foundation-outputs.json)
+          echo "acrLoginServer=${ACR_LOGIN_SERVER}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to ACR
+        run: az acr login --name $(echo "${{ steps.foundation.outputs.acrLoginServer }}" | cut -d'.' -f1)
+
+      - name: Build and push API image
+        run: |
+          docker build -f Dockerfile.api \
+            -t ${{ steps.foundation.outputs.acrLoginServer }}/apex-api:${{ github.sha }} \
+            .
+          docker push ${{ steps.foundation.outputs.acrLoginServer }}/apex-api:${{ github.sha }}
+
+      - name: Build and push Client image
+        run: |
+          docker build -f Dockerfile.client \
+            -t ${{ steps.foundation.outputs.acrLoginServer }}/apex-client:${{ github.sha }} \
+            .
+          docker push ${{ steps.foundation.outputs.acrLoginServer }}/apex-client:${{ github.sha }}
+
+      - name: Deploy full infrastructure
         id: infra
         run: |
           az deployment group create \
@@ -46,40 +76,6 @@ jobs:
               azureOpenaiApiVersion=${{ secrets.AZURE_OPENAI_API_VERSION }} \
             --query "properties.outputs" \
             --output json > deploy-outputs.json
-
-          ACR_LOGIN_SERVER=$(jq -r '.acrLoginServer.value' deploy-outputs.json)
-          echo "acrLoginServer=${ACR_LOGIN_SERVER}" >> "$GITHUB_OUTPUT"
-
-      - name: Login to ACR
-        run: az acr login --name $(echo "${{ steps.infra.outputs.acrLoginServer }}" | cut -d'.' -f1)
-
-      - name: Build and push API image
-        run: |
-          docker build -f Dockerfile.api \
-            -t ${{ steps.infra.outputs.acrLoginServer }}/apex-api:${{ github.sha }} \
-            .
-          docker push ${{ steps.infra.outputs.acrLoginServer }}/apex-api:${{ github.sha }}
-
-      - name: Build and push Client image
-        run: |
-          docker build -f Dockerfile.client \
-            -t ${{ steps.infra.outputs.acrLoginServer }}/apex-client:${{ github.sha }} \
-            .
-          docker push ${{ steps.infra.outputs.acrLoginServer }}/apex-client:${{ github.sha }}
-
-      - name: Update API container app
-        run: |
-          az containerapp update \
-            --name apex-api \
-            --resource-group ${{ secrets.AZURE_RG }} \
-            --image ${{ steps.infra.outputs.acrLoginServer }}/apex-api:${{ github.sha }}
-
-      - name: Update Client container app
-        run: |
-          az containerapp update \
-            --name apex-client \
-            --resource-group ${{ secrets.AZURE_RG }} \
-            --image ${{ steps.infra.outputs.acrLoginServer }}/apex-client:${{ github.sha }}
 
       - name: Display deployment URLs
         run: |
