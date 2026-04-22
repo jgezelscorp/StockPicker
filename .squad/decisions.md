@@ -2,6 +2,19 @@
 
 ## Active Decisions
 
+### GitHub-First Workflow Directive (2026-04-22)
+**By:** Jan G. (via Copilot)
+**Status:** Accepted — immediate effect
+
+Every code change MUST go through proper GitHub workflow:
+1. **Branch per feature/fix** — never commit directly to `master`
+2. **Commit with clear messages** — conventional commits preferred
+3. **Push to remote** and open a **Pull Request**
+4. **Scribe always commits .squad/ state** after agent work
+5. Agents with GitHub MCP access or git CLI handle all push/PR operations
+6. **Pending:** Remote origin needs to be configured (`git remote add origin <url>`)
+
+
 ### APEX System Architecture (2026-01-20)
 
 **Author:** Grant (Lead / Architect)  
