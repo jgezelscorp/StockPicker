@@ -6,16 +6,24 @@
 - User: Jan G.
 - Backend scope: REST APIs, trading engine, background scheduling, data pipelines, database, Azure config
 
-## 2026-04-22 — Strategy Overhaul Coordination
+## 2026-04-22 — Azure Deployment SUCCESS + Strategy Overhaul Coordination
 
-**Note:** Grant and Malcolm completed two major architectural initiatives (multi-strategy trading + signal engine upgrades). Muldoon's next phase will involve:
+**DEPLOYMENT COMPLETE (13:07 UTC):**
+- ✅ Container Apps live in Sweden Central region
+- ✅ Client: https://apex-client.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- ✅ API (internal): apex-api.internal.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- ✅ 9 pipeline runs, 4 critical fixes applied iteratively
+- ✅ Decision documented: ACR admin credentials (interim), upgrade to managed identity when SP elevated to Owner
+
+**Next Phase — Strategy Overhaul Coordination:**
+Grant and Malcolm completed two major architectural initiatives (multi-strategy trading + signal engine upgrades). Muldoon's upcoming work:
 1. Scheduler redesign for per-strategy cadences (momentum 5-min, value 4-hour, macro daily)
 2. Capital allocation enforcement across 3 strategies (25%/35%/40% splits)
 3. Cross-strategy rebalancing logic and circuit breakers
 4. Integration of 15 new signal modules (5 per strategy)
 5. Portfolio-level risk metrics for hedge decisions
 
-Key decisions merged into `.squad/decisions.md`.
+Key decisions merged into `.squad/decisions.md` (including deployment ACR decision).
 
 ## Learnings
 

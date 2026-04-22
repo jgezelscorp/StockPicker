@@ -3215,3 +3215,50 @@ gh api repos/jgezelscorp/Apex/branches/master/protection --method PUT --input - 
 }
 ```
 
+
+---
+
+## ACR Admin Credentials for Container App Deployments (2026-04-22)
+
+**By:** Muldoon (Backend Dev)  
+**Status:** Implemented — Live in Production  
+**Date:** 2026-04-22
+
+### Context
+
+APEX deployment to Azure Container Apps required pulling container images from Azure Container Registry (ACR). Initial design used managed identity + AcrPull role assignment, but the GitHub Actions OIDC service principal has **Contributor** role only—insufficient to create Microsoft.Authorization/roleAssignments resources.
+
+### Decision
+
+Switched from managed identity + role assignment to **ACR admin credentials** for Container App registry authentication. This avoids the roleAssignment permission requirement entirely and works with Contributor-only SP permissions.
+
+### Trade-offs
+
+**Advantages:**
+- ✅ Works with Contributor-only service principal permissions
+- ✅ Simpler Bicep (no managed identity resource or role assignment logic)
+- ✅ Enabled successful deployment (9 runs, 4 fixes, then live)
+
+**Disadvantages:**
+- ⚠️ Admin credentials are less secure than managed identity (shared secret vs RBAC)
+- ⚠️ Credentials stored as Container App secrets (must rotate periodically)
+
+### Future Improvement
+
+When Jan G. grants the service principal **Owner** or **User Access Administrator** role on the resource group, revert to managed identity + AcrPull role assignment for improved security posture and reduced credential rotation overhead.
+
+### Affected Files
+
+- infra/acr.bicep — ACR creation with admin credentials export
+- infra/main.bicep — Secret binding to Container Apps
+- infra/container-app-api.bicep — API registry config
+- infra/container-app-client.bicep — Client registry config
+- infra/foundation.bicep (new) — Foundation deployment phase
+
+### Deployment Result
+
+- **Date:** 2026-04-22, 13:07 UTC
+- **Pipeline runs:** 9 (4 fixes applied iteratively)
+- **Client URL:** https://apex-client.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- **API FQDN:** apex-api.internal.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- **Status:** ✅ LIVE

@@ -6,6 +6,19 @@
 - User: Jan G.
 - Data scope: Market data APIs, valuation metrics, trend detection, sentiment analysis, news signals, confidence scoring, learning system
 
+## 2026-04-22 — APEX Live: Azure Container Apps Deployment SUCCESS
+
+Muldoon successfully deployed APEX to Azure Container Apps (Sweden Central region). All three major architectural initiatives now complete and in production:
+- **Grant**: Multi-strategy trading architecture + hedging/shorting framework ✅
+- **Malcolm**: Signal engine audit + FRED/Reddit data integration ✅
+- **Muldoon**: Azure Container Apps deployment with ACR admin credentials ✅
+
+**Live Endpoints:**
+- Client: https://apex-client.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- API (internal): apex-api.internal.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+
+Signal pipeline with FRED economic data and Reddit buzz tracking now in production. Next: Monitor health, then proceed with 15 new signal module integration (5 per strategy).
+
 ## Learnings
 
 - Signal pipeline uses 4 analysers (Valuation, Trend, Sentiment, Search Interest) with weights 35/25/20/20 per task spec. Grant's ADR had 6 sources with different weights — I consolidated news + social into one Sentiment signal and deferred Macro until we have real data sources.
