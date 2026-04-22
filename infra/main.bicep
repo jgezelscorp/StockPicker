@@ -13,9 +13,23 @@ param imageTag string
 @secure()
 param finnhubApiKey string
 
-@description('OpenAI API key')
+@description('Alpha Vantage MCP API key')
 @secure()
-param openaiApiKey string
+param alphaVantageApiKey string
+
+@description('Azure OpenAI API key')
+@secure()
+param azureOpenaiApiKey string
+
+@description('Azure OpenAI endpoint URL')
+@secure()
+param azureOpenaiEndpoint string
+
+@description('Azure OpenAI deployment name')
+param azureOpenaiDeployment string
+
+@description('Azure OpenAI API version')
+param azureOpenaiApiVersion string
 
 var resourceToken = uniqueString(resourceGroup().id, environmentName)
 
@@ -45,7 +59,11 @@ module containerAppApi 'modules/container-app-api.bicep' = {
     acrIdentityId: acr.outputs.acrIdentityId
     imageTag: imageTag
     finnhubApiKey: finnhubApiKey
-    openaiApiKey: openaiApiKey
+    alphaVantageApiKey: alphaVantageApiKey
+    azureOpenaiApiKey: azureOpenaiApiKey
+    azureOpenaiEndpoint: azureOpenaiEndpoint
+    azureOpenaiDeployment: azureOpenaiDeployment
+    azureOpenaiApiVersion: azureOpenaiApiVersion
   }
 }
 

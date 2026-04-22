@@ -17,9 +17,23 @@ param imageTag string
 @secure()
 param finnhubApiKey string
 
-@description('OpenAI API key')
+@description('Alpha Vantage MCP API key')
 @secure()
-param openaiApiKey string
+param alphaVantageApiKey string
+
+@description('Azure OpenAI API key')
+@secure()
+param azureOpenaiApiKey string
+
+@description('Azure OpenAI endpoint URL')
+@secure()
+param azureOpenaiEndpoint string
+
+@description('Azure OpenAI deployment name')
+param azureOpenaiDeployment string
+
+@description('Azure OpenAI API version')
+param azureOpenaiApiVersion string
 
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'apex-api'
@@ -51,8 +65,16 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           value: finnhubApiKey
         }
         {
-          name: 'openai-api-key'
-          value: openaiApiKey
+          name: 'alpha-vantage-api-key'
+          value: alphaVantageApiKey
+        }
+        {
+          name: 'azure-openai-api-key'
+          value: azureOpenaiApiKey
+        }
+        {
+          name: 'azure-openai-endpoint'
+          value: azureOpenaiEndpoint
         }
       ]
     }
@@ -83,8 +105,24 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
               secretRef: 'finnhub-api-key'
             }
             {
-              name: 'OPENAI_API_KEY'
-              secretRef: 'openai-api-key'
+              name: 'ALPHA_VANTAGE_MCP_API_KEY'
+              secretRef: 'alpha-vantage-api-key'
+            }
+            {
+              name: 'AZURE_OPENAI_API_KEY'
+              secretRef: 'azure-openai-api-key'
+            }
+            {
+              name: 'AZURE_OPENAI_ENDPOINT'
+              secretRef: 'azure-openai-endpoint'
+            }
+            {
+              name: 'AZURE_OPENAI_DEPLOYMENT'
+              value: azureOpenaiDeployment
+            }
+            {
+              name: 'AZURE_OPENAI_API_VERSION'
+              value: azureOpenaiApiVersion
             }
           ]
           volumeMounts: [
@@ -98,7 +136,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Liveness'
               httpGet: {
                 port: 3001
-                path: '/api/status'
+                path: '/api/health'
               }
               initialDelaySeconds: 10
               periodSeconds: 30
@@ -107,7 +145,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Readiness'
               httpGet: {
                 port: 3001
-                path: '/api/status'
+                path: '/api/health'
               }
               initialDelaySeconds: 5
               periodSeconds: 10

@@ -209,4 +209,13 @@ Key decisions merged into `.squad/decisions.md`.
 - **CI/CD:** `.github/workflows/deploy.yml` — OIDC login, build+push both images tagged with git SHA, deploy Bicep, update container apps. Triggers on push to main (excludes .squad/ and .md files).
 - **SQLite caveat:** EmptyDir volume is ephemeral. Single API replica enforced (SQLite = single writer). Future: migrate to Azure File Share or Azure SQL for durability.
 - **Secrets:** FINNHUB_API_KEY and OPENAI_API_KEY passed as Container Apps secrets via Bicep secure params. Azure auth via OIDC federated credentials.
+
+### 2025-07-26 — Deployment Secret Alignment (Azure OpenAI)
+- **Problem:** Deployment files referenced `OPENAI_API_KEY` (plain OpenAI) but the project uses Azure OpenAI. Also missing `ALPHA_VANTAGE_MCP_API_KEY`. Health probes pointed to `/api/status` but the actual endpoint is `/api/health`.
+- **Fixed across 3 files:**
+  - `.github/workflows/deploy.yml`: Removed `openaiApiKey` param, added 5 new params (alphaVantageApiKey, azureOpenaiApiKey, azureOpenaiEndpoint, azureOpenaiDeployment, azureOpenaiApiVersion) from GitHub secrets.
+  - `infra/main.bicep`: Replaced `openaiApiKey` with 5 new params (3 @secure, 2 plain config), passed all to container-app-api module.
+  - `infra/modules/container-app-api.bicep`: Replaced `openai-api-key` secret with 3 secrets (alpha-vantage, azure-openai-key, azure-openai-endpoint). Added env vars for all 5 new settings. Non-secret config (deployment name, API version) set as plain env vars, not secrets.
+  - Fixed health probe paths from `/api/status` to `/api/health` (matches actual Express route in `server/src/index.ts`).
+- **Pattern:** Sensitive values (API keys, endpoint URLs) go through Container Apps secrets → secretRef. Non-sensitive config (deployment name, API version) are plain env var values.
 - **Key files:** `Dockerfile.client`, `Dockerfile.api`, `nginx/nginx.conf.template`, `infra/main.bicep`, `infra/modules/*.bicep`, `.github/workflows/deploy.yml`.
