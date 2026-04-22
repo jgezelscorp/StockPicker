@@ -75,7 +75,7 @@ module containerAppClient 'modules/container-app-client.bicep' = {
     acrLoginServer: acr.outputs.acrLoginServer
     acrName: acr.outputs.acrName
     imageTag: imageTag
-    apiUrl: 'http://${containerAppApi.outputs.fqdn}/'
+    apiUrl: 'http://${containerAppApi.outputs.fqdn}'
   }
 }
 
