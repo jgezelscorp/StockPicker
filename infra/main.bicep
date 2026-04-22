@@ -56,7 +56,7 @@ module containerAppApi 'modules/container-app-api.bicep' = {
     location: location
     environmentId: containerAppsEnv.outputs.environmentId
     acrLoginServer: acr.outputs.acrLoginServer
-    acrIdentityId: acr.outputs.acrIdentityId
+    acrName: acr.outputs.acrName
     imageTag: imageTag
     finnhubApiKey: finnhubApiKey
     alphaVantageApiKey: alphaVantageApiKey
@@ -73,7 +73,7 @@ module containerAppClient 'modules/container-app-client.bicep' = {
     location: location
     environmentId: containerAppsEnv.outputs.environmentId
     acrLoginServer: acr.outputs.acrLoginServer
-    acrIdentityId: acr.outputs.acrIdentityId
+    acrName: acr.outputs.acrName
     imageTag: imageTag
     apiUrl: 'http://${containerAppApi.outputs.fqdn}/'
   }
@@ -82,4 +82,3 @@ module containerAppClient 'modules/container-app-client.bicep' = {
 output acrLoginServer string = acr.outputs.acrLoginServer
 output apiUrl string = containerAppApi.outputs.fqdn
 output clientUrl string = containerAppClient.outputs.fqdn
-output acrIdentityId string = acr.outputs.acrIdentityId

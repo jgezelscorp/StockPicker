@@ -7,8 +7,8 @@ param environmentId string
 @description('ACR login server')
 param acrLoginServer string
 
-@description('User-assigned managed identity resource ID for ACR pull')
-param acrIdentityId string
+@description('ACR resource name for credential lookup')
+param acrName string
 
 @description('Container image tag')
 param imageTag string
@@ -35,15 +35,13 @@ param azureOpenaiDeployment string
 @description('Azure OpenAI API version')
 param azureOpenaiApiVersion string
 
+resource existingAcr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' existing = {
+  name: acrName
+}
+
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'apex-api'
   location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${acrIdentityId}': {}
-    }
-  }
   properties: {
     managedEnvironmentId: environmentId
     configuration: {
@@ -56,10 +54,15 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: acrLoginServer
-          identity: acrIdentityId
+          username: existingAcr.listCredentials().username
+          passwordSecretRef: 'acr-password'
         }
       ]
       secrets: [
+        {
+          name: 'acr-password'
+          value: existingAcr.listCredentials().passwords[0].value
+        }
         {
           name: 'finnhub-api-key'
           value: finnhubApiKey
