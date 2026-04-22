@@ -19,6 +19,22 @@ Key decisions merged into `.squad/decisions.md`.
 
 ## Learnings
 
+### 2026-04-22 — First Successful Azure Deployment (Run #9)
+- **Deployed to**: Azure Container Apps, Sweden Central region
+- **Client URL**: https://apex-client.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- **API Internal FQDN**: apex-api.internal.jollyflower-67b1d43f.swedencentral.azurecontainerapps.io
+- **ACR**: acrsgghlnu2trb7g.azurecr.io
+- **Pipeline took 9 runs to succeed.** Issues fixed in order:
+  1. **Run #1-4**: Missing `AZURE_RG` secret → Jan added it
+  2. **Run #5**: SP lacks `Microsoft.Authorization/roleAssignments/write` → Switched from managed identity AcrPull role assignment to ACR admin credentials
+  3. **Run #6**: Empty `ALPHA_VANTAGE_MCP_API_KEY` secret causes Container Apps to reject → Added `!empty()` fallback to `'not-configured'`
+  4. **Run #7**: `MANIFEST_UNKNOWN` — Container Apps created before images pushed → Split workflow into foundation (ACR+env) → Docker build/push → full deploy
+  5. **Run #8**: Dockerfile `COPY --from=deps /app/server/node_modules` fails — npm workspaces hoist to root `node_modules` only → Removed workspace-level COPY lines
+  6. **Run #9**: ✅ SUCCESS — all steps green, ~4.5min total
+- **Key decision**: ACR admin credentials instead of managed identity (Contributor SP can't create role assignments). Future: upgrade SP to Owner or add User Access Administrator role, then switch back to managed identity for security.
+- **Infra files changed**: `acr.bicep`, `main.bicep`, `container-app-api.bicep`, `container-app-client.bicep`, new `foundation.bicep`
+- **Docker files changed**: `Dockerfile.api`, `Dockerfile.client` (removed non-existent workspace node_modules COPY)
+
 ### 2025-07-25 — Branch Protection Configuration (BLOCKED — re-confirmed 2025-07-25)
 - Attempted to configure branch protection on `master` and `main` branches of `jgezelscorp/Apex` via both the rulesets API and classic branch protection API.
 - Desired rules: require 1 PR approval, dismiss stale reviews, admin-only bypass.
