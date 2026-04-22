@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import axios from 'axios';
 import { getDb } from '../db';
 import {
   getPortfolio,
@@ -28,6 +29,7 @@ import {
 import { getRecentLogs, onLog } from '../services/activityLogger';
 import { DEFAULT_SCHEDULER_CONFIG } from '../types';
 import { getLLMStatus } from '../services/llm';
+import { evaluatePastDecisions } from '../services/learningEngine';
 
 const router = Router();
 
@@ -398,6 +400,159 @@ router.get('/analysis/decisions', (_req, res) => {
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// GET /analysis — recent analysis_logs with stock symbols (used by Analysis page)
+router.get('/analysis', (req, res) => {
+  try {
+    const db = getDb();
+    const { stockId } = req.query;
+
+    let rows: any[];
+    if (stockId) {
+      rows = db.prepare(`
+        SELECT a.*, s.symbol, s.name as stock_name
+        FROM analysis_logs a
+        JOIN stocks s ON s.id = a.stock_id
+        WHERE a.stock_id = ?
+        ORDER BY a.analysed_at DESC LIMIT 50
+      `).all(Number(stockId));
+    } else {
+      rows = db.prepare(`
+        SELECT a.*, s.symbol, s.name as stock_name
+        FROM analysis_logs a
+        JOIN stocks s ON s.id = a.stock_id
+        ORDER BY a.analysed_at DESC LIMIT 50
+      `).all();
+    }
+
+    res.json({ success: true, data: rows });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /performance — portfolio performance metrics (used by Analysis page)
+router.get('/performance', (_req, res) => {
+  try {
+    const metrics = getPerformanceMetrics();
+    res.json({ success: true, data: metrics });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /learning — learning outcomes (used by Analysis page)
+router.get('/learning', (_req, res) => {
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT lo.*, t.stock_id, s.symbol
+      FROM learning_outcomes lo
+      JOIN trades t ON t.id = lo.trade_id
+      JOIN stocks s ON s.id = t.stock_id
+      ORDER BY lo.evaluated_at DESC LIMIT 100
+    `).all();
+    res.json({ success: true, data: rows });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /learning/seed — insert sample learning_outcomes for dev/demo
+router.post('/learning/seed', (_req, res) => {
+  try {
+    const db = getDb();
+    const existing = db.prepare('SELECT COUNT(*) as cnt FROM learning_outcomes').get() as any;
+    if (existing.cnt > 0) {
+      return res.json({ success: true, data: { inserted: 0, message: 'Data already exists' } });
+    }
+
+    // Ensure a seed stock exists for FK satisfaction
+    db.prepare(`INSERT OR IGNORE INTO stocks (id, symbol, name, market, asset_type, sector)
+      VALUES (9000, 'SEED', 'Seed Data Corp', 'US', 'stock', 'Technology')`).run();
+
+    const signals = ['pe_ratio', 'price_trend', 'macro_trend', 'google_trends', 'social_sentiment', 'news_sentiment'] as const;
+
+    const rows: Array<{
+      wasCorrect: number; holdDays: number; expectedRet: number; actualRet: number;
+      weeksAgo: number; daysOffset: number;
+    }> = [
+      { wasCorrect: 1, holdDays: 14, expectedRet: 5.0, actualRet: 6.2, weeksAgo: 8, daysOffset: 0 },
+      { wasCorrect: 0, holdDays: 30, expectedRet: 8.0, actualRet: -3.1, weeksAgo: 8, daysOffset: 2 },
+      { wasCorrect: 1, holdDays: 7,  expectedRet: 3.0, actualRet: 4.5, weeksAgo: 7, daysOffset: 0 },
+      { wasCorrect: 1, holdDays: 45, expectedRet: 12.0, actualRet: 10.8, weeksAgo: 7, daysOffset: 3 },
+      { wasCorrect: 0, holdDays: 20, expectedRet: 6.0, actualRet: -1.5, weeksAgo: 6, daysOffset: 1 },
+      { wasCorrect: 1, holdDays: 60, expectedRet: 10.0, actualRet: 14.2, weeksAgo: 6, daysOffset: 4 },
+      { wasCorrect: 0, holdDays: 10, expectedRet: 4.0, actualRet: -4.8, weeksAgo: 5, daysOffset: 0 },
+      { wasCorrect: 1, holdDays: 35, expectedRet: 7.5, actualRet: 8.1, weeksAgo: 5, daysOffset: 2 },
+      { wasCorrect: 1, holdDays: 22, expectedRet: 5.5, actualRet: 7.0, weeksAgo: 4, daysOffset: 1 },
+      { wasCorrect: 0, holdDays: 15, expectedRet: 9.0, actualRet: -2.3, weeksAgo: 4, daysOffset: 3 },
+      { wasCorrect: 1, holdDays: 50, expectedRet: 11.0, actualRet: 13.5, weeksAgo: 3, daysOffset: 0 },
+      { wasCorrect: 0, holdDays: 8,  expectedRet: 3.5, actualRet: -5.0, weeksAgo: 3, daysOffset: 2 },
+      { wasCorrect: 1, holdDays: 28, expectedRet: 6.0, actualRet: 5.8, weeksAgo: 2, daysOffset: 0 },
+      { wasCorrect: 1, holdDays: 90, expectedRet: 15.0, actualRet: 18.2, weeksAgo: 2, daysOffset: 4 },
+      { wasCorrect: 0, holdDays: 12, expectedRet: 4.5, actualRet: -7.1, weeksAgo: 1, daysOffset: 1 },
+      { wasCorrect: 1, holdDays: 40, expectedRet: 8.0, actualRet: 9.3, weeksAgo: 1, daysOffset: 3 },
+      { wasCorrect: 0, holdDays: 5,  expectedRet: 2.0, actualRet: -1.0, weeksAgo: 1, daysOffset: 5 },
+      { wasCorrect: 1, holdDays: 18, expectedRet: 6.5, actualRet: 7.9, weeksAgo: 0, daysOffset: 0 },
+    ];
+
+    const txn= db.transaction(() => {
+      let inserted = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const tradeId = 9001 + i;
+        const evalDate = `datetime('now', '-${r.weeksAgo * 7 + r.daysOffset} days')`;
+
+        // Build signalAccuracy with varied correctness per signal
+        const signalAccuracy: Record<string, { accurate: boolean }> = {};
+        for (const sig of signals) {
+          // Make roughly 60% of individual signals accurate, with variation
+          signalAccuracy[sig] = { accurate: (tradeId + sig.length) % 3 !== 0 };
+        }
+
+        const lessons = JSON.stringify({
+          signalAccuracy,
+          summary: r.wasCorrect ? 'Trade outcome matched prediction' : 'Trade deviated from expected outcome',
+        });
+
+        // Insert placeholder trade with a backdated executed_at
+        db.prepare(`INSERT OR IGNORE INTO trades
+          (id, stock_id, action, quantity, price_per_share, total_value, confidence, rationale, signal_snapshot, executed_at)
+          VALUES (?, 9000, 'sell', 10, 100, 1000, 0.7, 'Seed trade', '{}', datetime('now', '-${r.weeksAgo * 7 + r.daysOffset + r.holdDays} days'))`)
+          .run(tradeId);
+
+        db.prepare(`INSERT INTO learning_outcomes
+          (trade_id, expected_return, actual_return, holding_days, was_correct, lessons_learned, evaluated_at)
+          VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-${r.weeksAgo * 7 + r.daysOffset} days'))`)
+          .run(tradeId, r.expectedRet, r.actualRet, r.holdDays, r.wasCorrect, lessons);
+
+        inserted++;
+      }
+      return inserted;
+    });
+
+    const inserted = txn();
+    res.json({ success: true, data: { inserted } });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /learning/evaluate — manually trigger learning evaluation
+router.post('/learning/evaluate', (_req, res) => {
+  try {
+    const outcomes = evaluatePastDecisions();
+    res.json({ success: true, data: { evaluated: outcomes.length, outcomes } });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /health — service health check (used by status bar)
+router.get('/health', (_req, res) => {
+  res.json({ success: true, status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // ─── Watchlist ──────────────────────────────────────────────────
@@ -1042,6 +1197,167 @@ router.get('/reactive/history', (_req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Dashboard News Feeds ──────────────────────────────────────
+
+const GENERAL_NEWS_CACHE_KEY = 'general_news:all';
+const GENERAL_NEWS_CACHE_TTL = 15; // minutes
+
+const BUSINESS_KEYWORDS = [
+  'earnings', 'revenue', 'profit', 'stock', 'market', 'shares', 'ipo',
+  'merger', 'acquisition', 'dividend', 'quarterly', 'ceo', 'bank',
+  'trading', 'rally', 'sell-off', 'index', 's&p', 'nasdaq', 'dow',
+  'bond', 'yield', 'interest rate', 'fed', 'inflation', 'gdp', 'jobs',
+  'unemployment', 'retail sales', 'housing',
+];
+
+const GEOPOLITICAL_KEYWORDS = [
+  'war', 'conflict', 'sanction', 'election', 'tariff', 'trade deal',
+  'treaty', 'diplomacy', 'nato', 'un', 'g7', 'g20', 'military',
+  'nuclear', 'climate', 'regulation', 'policy', 'legislation',
+  'congress', 'parliament', 'border', 'refugee', 'coup', 'protest',
+  'embargo', 'security', 'terrorism', 'cyber',
+];
+
+const SENTIMENT_POSITIVE = [
+  'beats', 'upgrade', 'growth', 'profit', 'record', 'surge', 'rally',
+  'gains', 'bullish', 'outperform', 'strong', 'exceeded', 'breakout',
+  'innovation', 'partnership', 'expansion', 'dividend', 'buyback',
+  'approval', 'recovery', 'optimism', 'beat', 'rises', 'soars',
+];
+
+const SENTIMENT_NEGATIVE = [
+  'miss', 'downgrade', 'lawsuit', 'recall', 'decline', 'loss', 'crash',
+  'bearish', 'underperform', 'weak', 'fell', 'drops', 'warning',
+  'fraud', 'investigation', 'layoffs', 'bankruptcy', 'default', 'fine',
+  'slump', 'plunge', 'cut', 'debt', 'risk', 'concern', 'uncertainty',
+];
+
+function newsScoreSentiment(text: string): number {
+  const lower = text.toLowerCase();
+  let pos = 0, neg = 0;
+  for (const w of SENTIMENT_POSITIVE) { if (lower.includes(w)) pos++; }
+  for (const w of SENTIMENT_NEGATIVE) { if (lower.includes(w)) neg++; }
+  const total = pos + neg;
+  if (total === 0) return 0;
+  return Math.round(((pos - neg) / total) * 100) / 100;
+}
+
+function matchesKeywords(text: string, keywords: string[]): boolean {
+  const lower = text.toLowerCase();
+  return keywords.some(kw => lower.includes(kw));
+}
+
+async function fetchCachedGeneralNews(): Promise<any[]> {
+  try {
+    const db = getDb();
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS market_data_cache (
+        cache_key   TEXT PRIMARY KEY,
+        data        TEXT NOT NULL,
+        expires_at  TEXT NOT NULL
+      )
+    `);
+
+    // Check cache
+    const row = db.prepare(
+      "SELECT data FROM market_data_cache WHERE cache_key = ? AND expires_at > datetime('now')"
+    ).get(GENERAL_NEWS_CACHE_KEY) as any;
+    if (row) return JSON.parse(row.data);
+  } catch { /* cache miss */ }
+
+  const apiKey = process.env.FINNHUB_API_KEY;
+  if (!apiKey) return [];
+
+  try {
+    const resp = await axios.get('https://finnhub.io/api/v1/news', {
+      params: { category: 'general', token: apiKey },
+      timeout: 10_000,
+    });
+
+    if (!Array.isArray(resp.data)) return [];
+
+    const articles = resp.data.slice(0, 50);
+
+    // Write to cache
+    try {
+      const db = getDb();
+      db.prepare(`
+        INSERT OR REPLACE INTO market_data_cache (cache_key, data, expires_at)
+        VALUES (?, ?, datetime('now', '+' || ? || ' minutes'))
+      `).run(GENERAL_NEWS_CACHE_KEY, JSON.stringify(articles), GENERAL_NEWS_CACHE_TTL);
+    } catch { /* cache write failed */ }
+
+    return articles;
+  } catch {
+    return [];
+  }
+}
+
+function formatNewsArticles(
+  raw: any[],
+  keywords: string[],
+  category: 'business' | 'geopolitical',
+) {
+  return raw
+    .filter((item: any) => {
+      const text = `${item.headline || ''} ${item.summary || ''}`;
+      return matchesKeywords(text, keywords);
+    })
+    .slice(0, 20)
+    .map((item: any) => {
+      const combinedText = `${item.headline || ''} ${item.summary || ''}`;
+      return {
+        headline: item.headline || '',
+        source: item.source || '',
+        summary: item.summary || '',
+        url: item.url || '',
+        published_at: item.datetime
+          ? new Date(item.datetime * 1000).toISOString()
+          : new Date().toISOString(),
+        category,
+        sentiment: newsScoreSentiment(combinedText),
+      };
+    });
+}
+
+router.get('/news/business', async (_req, res) => {
+  try {
+    const apiKey = process.env.FINNHUB_API_KEY;
+    if (!apiKey) {
+      return res.json({
+        data: [],
+        fetched_at: new Date().toISOString(),
+        message: 'FINNHUB_API_KEY not configured — set it for real news data',
+      });
+    }
+
+    const raw = await fetchCachedGeneralNews();
+    const articles = formatNewsArticles(raw, BUSINESS_KEYWORDS, 'business');
+    res.json({ data: articles, fetched_at: new Date().toISOString() });
+  } catch (err: any) {
+    res.json({ data: [], fetched_at: new Date().toISOString(), error: err.message });
+  }
+});
+
+router.get('/news/geopolitical', async (_req, res) => {
+  try {
+    const apiKey = process.env.FINNHUB_API_KEY;
+    if (!apiKey) {
+      return res.json({
+        data: [],
+        fetched_at: new Date().toISOString(),
+        message: 'FINNHUB_API_KEY not configured — set it for real news data',
+      });
+    }
+
+    const raw = await fetchCachedGeneralNews();
+    const articles = formatNewsArticles(raw, GEOPOLITICAL_KEYWORDS, 'geopolitical');
+    res.json({ data: articles, fetched_at: new Date().toISOString() });
+  } catch (err: any) {
+    res.json({ data: [], fetched_at: new Date().toISOString(), error: err.message });
   }
 });
 

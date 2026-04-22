@@ -164,6 +164,16 @@ Key decisions merged into `.squad/decisions.md`.
 
 ### 2026-07-05 — Portfolio Feature: Manual Sell, Refresh Prices, Strategy Info
 - **POST /api/portfolio/sell:** Manual sell endpoint. Validates symbol exists in open positions, checks quantity ≤ held, price > 0. Builds a `TradeOrder` with confidence 1.0 and `manual: true` signal snapshot, delegates to `executeTrade()`. Returns trade_id + updated position info.
+
+### 2026-07-07 — Dashboard News Feed Endpoints
+- **Two new endpoints:** `GET /api/news/business` and `GET /api/news/geopolitical` added to `routes/api.ts`.
+- **Data source:** Finnhub general news API (`/v1/news?category=general`), same as `reactiveNewsMonitor.ts`. Fetches once, filters twice by keyword lists.
+- **Caching:** 15-minute TTL in `market_data_cache` table (key: `general_news:all`). Shared cache between both endpoints to minimize API calls.
+- **Keyword filtering:** 30 business keywords (earnings, revenue, market, Fed, etc.) and 28 geopolitical keywords (war, sanction, election, tariff, etc.). Matched against headline + summary.
+- **Sentiment scoring:** Local copy of keyword-based scorer (same logic as `finnhub.ts` `scoreSentiment()`). Copied to avoid export dependency.
+- **Response shape:** `{ data: [...articles], fetched_at: ISO }`. Each article: headline, source, summary, url, published_at, category, sentiment.
+- **Error handling:** Missing FINNHUB_API_KEY returns empty array with message. API failures return empty array. Never throws.
+- **Build verified:** Clean `tsc --noEmit` on server. Zero regressions.
 - **POST /api/portfolio/refresh-prices:** Thin wrapper exposing `refreshPositionPrices()` from marketData.ts. Returns `{ success, updated: N }`.
 - **GET /portfolio/positions enhanced:** Now includes `strategy` object per position with stop-loss price, holding period info, sell confidence threshold, and strategy note. Uses asset_type from stocks table to pick stock vs ETF thresholds.
 - **Exported from tradingEngine.ts:** `STOCK_THRESHOLDS`, `ETF_THRESHOLDS`, `AssetThresholds` type, and `getThresholds()` function — previously module-private. Needed by the positions endpoint for strategy calculations.

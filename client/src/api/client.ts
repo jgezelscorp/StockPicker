@@ -79,8 +79,12 @@ export const api = {
   // Analysis Runs
   getAnalysisRuns: () => request<any>('/analysis-runs'),
 
+  // News
+  getBusinessNews: () => request<any>('/news/business'),
+  getGeopoliticalNews: () => request<any>('/news/geopolitical'),
+
   // Activity Log
-  getLogs: (params?: { limit?: number; offset?: number; category?: string; level?: string; since?: string; max_verbosity?: number }) => {
+  getLogs:(params?: { limit?: number; offset?: number; category?: string; level?: string; since?: string; max_verbosity?: number }) => {
     const qs = new URLSearchParams();
     if (params?.limit) qs.set('limit', String(params.limit));
     if (params?.offset) qs.set('offset', String(params.offset));

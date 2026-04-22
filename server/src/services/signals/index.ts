@@ -3,6 +3,7 @@ import { analyzeValuation } from './valuationSignal';
 import { analyzeTrend } from './trendSignal';
 import { analyzeSentiment } from './sentimentSignal';
 import { analyzeSearchInterest } from './searchInterestSignal';
+import { analyzeMacroRegime } from './macroRegimeSignal';
 import { ETF_SIGNAL_PIPELINE } from './etfSignals';
 
 // ─── Signal interfaces ────────────────────────────────────────────
@@ -371,4 +372,5 @@ export { analyzeValuation } from './valuationSignal';
 export { analyzeTrend } from './trendSignal';
 export { analyzeSentiment } from './sentimentSignal';
 export { analyzeSearchInterest } from './searchInterestSignal';
+export { analyzeMacroRegime } from './macroRegimeSignal';
 export * from './etfSignals';

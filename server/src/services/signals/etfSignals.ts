@@ -1,5 +1,6 @@
 import type { Stock } from '../../types';
 import type { SignalResult, MarketData } from './index';
+import { analyzeMacroRegime } from './macroRegimeSignal';
 
 /**
  * ETF-Specific Signal Analysis
@@ -535,7 +536,7 @@ export interface ETFSignalWeightConfig {
 }
 
 export const ETF_SIGNAL_PIPELINE: ETFSignalWeightConfig[] = [
-  { source: 'macro_trend',    weight: 0.35, analyzer: analyzeMacroTrend },
+  { source: 'macro_trend',    weight: 0.35, analyzer: analyzeMacroRegime },      // FRED-based macro regime (upgraded)
   { source: 'price_trend',    weight: 0.25, analyzer: analyzeSectorMomentum },
   { source: 'news_sentiment', weight: 0.20, analyzer: analyzeMarketSentiment },
   { source: 'google_trends',  weight: 0.10, analyzer: analyzeSearchInterestETF },

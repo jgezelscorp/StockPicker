@@ -27,6 +27,13 @@ export default function Analysis() {
   const analysis = useAnalysis();
   const learning = useLearning();
 
+  const isLoading = perf.isLoading || analysis.isLoading || learning.isLoading;
+  const errors = [
+    perf.isError && `Performance: ${(perf.error as Error)?.message ?? 'failed'}`,
+    analysis.isError && `Analysis: ${(analysis.error as Error)?.message ?? 'failed'}`,
+    learning.isError && `Learning: ${(learning.error as Error)?.message ?? 'failed'}`,
+  ].filter(Boolean) as string[];
+
   const metrics = perf.data?.data;
   const analyses: any[] = analysis.data?.data ?? [];
   const learnings: any[] = learning.data?.data ?? [];
@@ -94,9 +101,103 @@ export default function Analysis() {
     return { correct, total: learnings.length, avgHold, avgExpected, avgActual };
   }, [learnings]);
 
+  const handleSeed = async () => {
+    try {
+      const resp = await fetch('/api/learning/seed', { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) {
+        learning.refetch();
+      } else {
+        alert(data.error || 'Seed failed');
+      }
+    } catch (err: any) {
+      alert('Seed error: ' + err.message);
+    }
+  };
+
+  const handleEvaluate = async () => {
+    try {
+      const resp = await fetch('/api/learning/evaluate', { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) {
+        learning.refetch();
+      } else {
+        alert(data.error || 'Evaluation failed');
+      }
+    } catch (err: any) {
+      alert('Evaluate error: ' + err.message);
+    }
+  };
+
   return (
     <div>
       <h1 style={{ fontSize: '1.35rem', fontWeight: 700, marginBottom: '1.5rem' }}>Analysis & Learning</h1>
+
+      {/* ─── Loading / Error States ─── */}
+      {isLoading && (
+        <div className="card" style={{ textAlign: 'center', padding: '2rem', marginBottom: '1.5rem' }}>
+          <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>⏳</div>
+          <div style={{ color: 'var(--text-secondary)' }}>Loading analysis data…</div>
+        </div>
+      )}
+      {errors.length > 0 && (
+        <div className="card" style={{
+          marginBottom: '1.5rem', padding: '1rem 1.25rem',
+          border: '1px solid rgba(248, 81, 73, 0.4)', background: 'rgba(248, 81, 73, 0.08)',
+        }}>
+          <div style={{ fontWeight: 600, color: '#f85149', marginBottom: '0.35rem' }}>⚠ Data fetch errors</div>
+          {errors.map((e, i) => (
+            <div key={i} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{e}</div>
+          ))}
+        </div>
+      )}
+
+      {/* ─── Dev Toolbar: Seed / Evaluate ─── */}
+      {learnings.length === 0 && (
+        <div style={{
+          background: '#1c2333',
+          border: '1px solid #30363d',
+          borderRadius: 8,
+          padding: '1rem 1.25rem',
+          marginBottom: '1.5rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '1rem',
+          flexWrap: 'wrap',
+        }}>
+          <span style={{ color: '#8b949e', fontSize: '0.85rem' }}>
+            📊 No learning data yet — the learning engine evaluates closed trades after 30 days.
+          </span>
+          <button
+            onClick={handleSeed}
+            style={{
+              background: '#238636',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              padding: '0.4rem 0.85rem',
+              fontSize: '0.8rem',
+              cursor: 'pointer',
+            }}
+          >
+            Seed Sample Data
+          </button>
+          <button
+            onClick={handleEvaluate}
+            style={{
+              background: '#1f6feb',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              padding: '0.4rem 0.85rem',
+              fontSize: '0.8rem',
+              cursor: 'pointer',
+            }}
+          >
+            Run Learning Evaluation
+          </button>
+        </div>
+      )}
 
       {/* ─── Performance Metric Cards ─── */}
       {metrics && (

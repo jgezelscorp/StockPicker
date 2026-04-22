@@ -191,6 +191,22 @@ export function useAnalysisRuns() {
   });
 }
 
+export function useBusinessNews() {
+  return useQuery({
+    queryKey: ['news-business'],
+    queryFn: api.getBusinessNews,
+    refetchInterval: 5 * 60_000,
+  });
+}
+
+export function useGeopoliticalNews() {
+  return useQuery({
+    queryKey: ['news-geopolitical'],
+    queryFn: api.getGeopoliticalNews,
+    refetchInterval: 5 * 60_000,
+  });
+}
+
 export function useActivityLogs(params?: { limit?: number; category?: string; level?: string; max_verbosity?: number }) {
   return useQuery({
     queryKey: ['activity-logs', params],

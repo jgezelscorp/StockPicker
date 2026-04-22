@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useDashboard, usePortfolioHistory, useAnalysis, useSystemStatus } from '../hooks/useApi';
+import { useDashboard, usePortfolioHistory, useAnalysis, useSystemStatus, useBusinessNews, useGeopoliticalNews } from '../hooks/useApi';
 import { Link } from 'react-router-dom';
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -35,8 +35,10 @@ export default function Dashboard() {
   const signals = useAnalysis();
   const sysStatus = useSystemStatus();
   const [selectedStock, setSelectedStock] = useState<string | null>(null);
+  const bizNews = useBusinessNews();
+  const geoNews = useGeopoliticalNews();
 
-  if (isLoading) return <div className="loading-state">Loading dashboard…</div>;
+  if (isLoading) return<div className="loading-state">Loading dashboard…</div>;
   if (error) return <div className="error-state">Error: {(error as Error).message}</div>;
 
   const d = data?.data;
@@ -269,6 +271,89 @@ export default function Dashboard() {
                 ))}
               </tbody>
             </table>
+          )}
+        </div>
+      </div>
+
+      {/* ─── News Feed Panels ─── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+        {/* Business News */}
+        <div className="card">
+          <div className="card-header">📰 Business News</div>
+          {bizNews.isLoading ? (
+            <div className="loading-state" style={{ padding: '1.5rem 0' }}>Loading news…</div>
+          ) : bizNews.isError ? (
+            <div className="error-state" style={{ padding: '1rem', fontSize: '0.85rem' }}>
+              Failed to load business news: {(bizNews.error as Error).message}
+            </div>
+          ) : !bizNews.data?.data?.length ? (
+            <div className="empty-state" style={{ padding: '1.5rem 0' }}><p>No news available</p></div>
+          ) : (
+            <div style={{ maxHeight: '320px', overflowY: 'auto', marginTop: '0.5rem' }}>
+              {bizNews.data.data.slice(0, 10).map((item: any, i: number) => (
+                <div key={i} style={{ padding: '0.5rem 0', borderBottom: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.4rem' }}>
+                    <span
+                      className={`status-dot ${item.sentiment > 0.1 ? 'status-active' : item.sentiment < -0.1 ? 'status-error' : ''}`}
+                      style={{ marginTop: '0.35rem', flexShrink: 0 }}
+                    />
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'var(--text-primary)', textDecoration: 'none', fontSize: '0.85rem', lineHeight: 1.35 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--accent)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-primary)')}
+                    >
+                      {item.headline}
+                    </a>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginLeft: '1rem', marginTop: '0.15rem' }}>
+                    {item.source} · {timeAgo(item.publishedAt)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Geopolitical News */}
+        <div className="card">
+          <div className="card-header">🌍 Geopolitical News</div>
+          {geoNews.isLoading ? (
+            <div className="loading-state" style={{ padding: '1.5rem 0' }}>Loading news…</div>
+          ) : geoNews.isError ? (
+            <div className="error-state" style={{ padding: '1rem', fontSize: '0.85rem' }}>
+              Failed to load geopolitical news: {(geoNews.error as Error).message}
+            </div>
+          ) : !geoNews.data?.data?.length ? (
+            <div className="empty-state" style={{ padding: '1.5rem 0' }}><p>No news available</p></div>
+          ) : (
+            <div style={{ maxHeight: '320px', overflowY: 'auto', marginTop: '0.5rem' }}>
+              {geoNews.data.data.slice(0, 10).map((item: any, i: number) => (
+                <div key={i} style={{ padding: '0.5rem 0', borderBottom: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.4rem' }}>
+                    <span
+                      className={`status-dot ${item.sentiment > 0.1 ? 'status-active' : item.sentiment < -0.1 ? 'status-error' : ''}`}
+                      style={{ marginTop: '0.35rem', flexShrink: 0 }}
+                    />
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'var(--text-primary)', textDecoration: 'none', fontSize: '0.85rem', lineHeight: 1.35 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--accent)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-primary)')}
+                    >
+                      {item.headline}
+                    </a>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginLeft: '1rem', marginTop: '0.15rem' }}>
+                    {item.source} · {timeAgo(item.publishedAt)}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </div>

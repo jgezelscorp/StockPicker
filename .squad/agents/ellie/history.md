@@ -121,3 +121,13 @@
 - **Learning:** Frontend + backend integration requires explicit state visualization. Data layer contract must include error states and loading lifecycle. Both now coordinated end-to-end.
 
 **Files:** Loading + error UI in `client/src/pages/Analysis.tsx`; API contract verified with Malcolm.
+
+### 2026-04-22 — Dashboard News Feed Panels
+- **Two new news panels:** Business News (📰) and Geopolitical News (🌍) added as a two-column grid row below Recent Trades + Top Signals on the Dashboard.
+- **Independent data fetching:** Each panel uses its own hook (`useBusinessNews`, `useGeopoliticalNews`) with 5-minute refetch interval. If one fails, the other still renders.
+- **API layer:** Added `getBusinessNews()` and `getGeopoliticalNews()` to client.ts hitting `/news/business` and `/news/geopolitical` endpoints.
+- **Headline display:** Up to 10 headlines per panel with clickable links (new tab), source name, relative time via existing `timeAgo()`, and sentiment dot (green >0.1, red <-0.1, gray neutral) using existing `status-dot` classes.
+- **Scrollable container:** Max-height 320px with overflow-y auto keeps page layout stable regardless of article count.
+- **Full state handling:** Loading spinner, error message, and empty state for each panel independently.
+- **Files:** `client/src/api/client.ts`, `client/src/hooks/useApi.ts`, `client/src/pages/Dashboard.tsx`.
+- **No new dependencies.** TypeScript compiles clean.

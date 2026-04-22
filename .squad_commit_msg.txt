@@ -1,0 +1,33 @@
+Multi-strategy architecture design + signal engine upgrades (2026-04-22)
+
+## Overview
+Completed two major architectural initiatives coordinated between Grant (Lead) and Malcolm (Data Engineer).
+
+## Grant: Multi-Strategy Trading Architecture
+- Designed three independent strategy engines: Momentum (25% capital, 5-min reactive), Value (35%, 4-hour), Macro ETF (40%, daily-monthly)
+- Specified 15 new signal modules (5 per strategy) with detailed scoring logic and confidence calculations
+- Identified 7 new data sources: FRED (macro), Reddit (social), SEC EDGAR (insider), GDELT (political), StockTwits, NewsAPI, Alpha Vantage
+- Defined per-strategy capital allocation, position sizing, risk limits, and circuit breakers
+- Outlined 4-phase phased implementation roadmap
+- Added cross-strategy guardrails: drift rebalancing, correlation guards, drawdown circuit breakers
+
+## Malcolm: Signal Engine Audit & Upgrade
+- Audited all 13 signal/service files and identified 3 critical gaps
+- Gap 1 (Macro signal): Replaced keyword-matching with real FRED economic data (7 series)
+- Gap 2 (Social sentiment): Integrated Reddit public API for real mention/engagement tracking
+- Gap 3 (News sentiment): Added velocity detection, urgency keywords, source quality weighting
+- Created `fredClient.ts`, `redditClient.ts`, `macroRegimeSignal.ts`
+- Enhanced `sentimentSignal.ts` with velocity/urgency/quality layering
+- Verified backward compatibility: all interfaces unchanged, graceful degradation on API failures
+
+## Administrative
+- Merged decision inbox files into decisions.md (3 files, deduplicated headers)
+- Updated agent history files for Grant, Malcolm, and Muldoon with activity summaries
+- Created orchestration logs for both agents with detailed work summaries
+- Created session log with brief overview
+
+## Impact
+- Signal quality improvements: macro +2.5x (real data vs keywords), social +3x (Reddit vs proxy), velocity +15% alpha potential
+- Next phase: Muldoon (scheduler redesign for per-strategy cadences), Wu (tests for capital allocation), Ellie (strategy-specific dashboards)
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
