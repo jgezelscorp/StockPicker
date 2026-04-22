@@ -3100,3 +3100,87 @@ Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
 
 No other environment changes needed. Reddit uses public endpoints (no key).
 
+---
+
+## Azure Container Apps Deployment Architecture
+
+**Date:** 2025-07-25  
+**Author:** Muldoon (Backend Dev)  
+**Status:** Implemented  
+
+### Context
+APEX needs a cloud deployment pipeline. The monorepo (client/server/shared) must be containerized and deployed to Azure.
+
+### Decision
+- **Two-container architecture** on Azure Container Apps: `apex-client` (Nginx + React build, external ingress) and `apex-api` (Node.js, internal ingress only).
+- **Nginx reverse proxy** on the client container forwards `/api/*` to the API container's internal FQDN — no CORS needed, single public endpoint.
+- **SQLite persistence** uses an EmptyDir volume at `/data/apex.db`. This is ephemeral — data survives container restarts but not re-provisioning. For production durability, migrate to Azure File Share or Azure SQL.
+- **Managed identity** for ACR pull — no admin credentials stored anywhere.
+- **OIDC** for GitHub Actions → Azure authentication (federated credentials, no secrets rotation needed).
+- **Single-replica API** (`maxReplicas: 1`) because SQLite doesn't support concurrent writers. Client scales to 3 replicas.
+- **Health probes** on both containers: API uses `/api/status`, client uses `/`.
+
+### Alternatives Considered
+- Azure App Service: Simpler but less control over multi-container networking.
+- Azure Kubernetes Service: Overkill for two containers.
+- Postgres instead of SQLite: Better for production but adds complexity and cost. Deferred.
+
+### Impact
+- CI/CD deploys on every push to `main` via GitHub Actions.
+- Six GitHub secrets required: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RG`, `FINNHUB_API_KEY`, `OPENAI_API_KEY`.
+- Bicep infra is idempotent — safe to re-run.
+
+---
+
+## Branch Protection for `master` and `main` — BLOCKED on Permissions
+
+**Author:** Muldoon (Backend Dev)  
+**Date:** 2025-07-25 (re-confirmed 2025-07-25)  
+**Status:** Blocked — requires admin action by Jan G.
+
+### Context
+Jan G. requested branch protection on `master` and `main` in `jgezelscorp/Apex`:
+- Require 1 PR approval before merge
+- Dismiss stale approvals on new commits
+- Admin-only bypass
+
+### Outcome
+**Could not apply.** The authenticated GitHub account (`jangezels_microsoft`) has only `pull` (read) access. Both the rulesets API and classic branch protection API require **admin** permissions and return 404 without them. Confirmed remote branches: `main`, `master`, `dependabot/npm_and_yarn/basic-ftp-5.2.2`.
+
+### Action Required
+Jan G. needs to choose one option:
+
+#### Option A: Grant admin access to `jangezels_microsoft`
+Go to https://github.com/jgezelscorp/Apex/settings/access → invite `jangezels_microsoft` as Admin → re-run this task.
+
+#### Option B: Configure via GitHub UI
+1. Go to https://github.com/jgezelscorp/Apex/settings/branches
+2. Add branch protection rule for `master`:
+   - ✅ Require pull request before merging (1 approval)
+   - ✅ Dismiss stale approvals on new commits
+   - Leave "Do not allow bypassing" unchecked (admin can bypass)
+3. Repeat for `main`
+
+#### Option C: Use gh CLI as repo owner
+```bash
+gh auth login   # authenticate as the repo owner account
+gh api repos/jgezelscorp/Apex/branches/master/protection --method PUT --input - <<< '{"required_pull_request_reviews":{"required_approving_review_count":1,"dismiss_stale_reviews":true},"enforce_admins":false,"required_status_checks":null,"restrictions":null}'
+# Repeat replacing master with main
+```
+
+### JSON payload ready to apply once permissions are resolved:
+```json
+{
+  "required_status_checks": null,
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+```
+
