@@ -6,6 +6,17 @@
 - User: Jan G.
 - Backend scope: REST APIs, trading engine, background scheduling, data pipelines, database, Azure config
 
+## 2026-04-22 — Strategy Overhaul Coordination
+
+**Note:** Grant and Malcolm completed two major architectural initiatives (multi-strategy trading + signal engine upgrades). Muldoon's next phase will involve:
+1. Scheduler redesign for per-strategy cadences (momentum 5-min, value 4-hour, macro daily)
+2. Capital allocation enforcement across 3 strategies (25%/35%/40% splits)
+3. Cross-strategy rebalancing logic and circuit breakers
+4. Integration of 15 new signal modules (5 per strategy)
+5. Portfolio-level risk metrics for hedge decisions
+
+Key decisions merged into `.squad/decisions.md`.
+
 ## Learnings
 
 ### 2025-01-20 — Core Backend Services Implementation

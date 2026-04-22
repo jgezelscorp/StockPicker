@@ -1277,3 +1277,1813 @@ The Analysis page needed a way for users to generate sample learning outcomes fo
 - Remove toolbar before production if desired (it only renders in dev when data is empty)
 - Can be extended to offer different seed datasets or evaluation options in future
 
+
+---
+
+## Phase 3 Decisions
+
+### Hedging & Short Selling Strategy (2026-04-22)
+
+**Author:** Grant (Lead / Architect)  
+**Status:** Proposed  
+**Date:** 2026-04-22  
+**Requested by:** Jan G.
+
+# ADR: Hedging & Short Selling Strategy for APEX
+
+**Author:** Grant (Lead / Architect)  
+**Status:** Proposed  
+**Date:** 2025-07-18  
+**Requested by:** Jan G.
+
+---
+
+## Context
+
+APEX currently only takes **long positions** — buy low, sell when targets are met or conviction drops. Jan wants to maximize profits by adding **short selling** (profit from price declines) and **hedging** (protect portfolio during downturns). This requires changes across the full stack: types, schema, signals, trading engine, portfolio tracker, and UI.
+
+### Current Architecture Summary
+
+- **Signals** produce a score 0–100 (bullish high, bearish low) with a direction (`bullish`/`bearish`/`neutral`)
+- **Trading Engine** maps composite score to recommendations: `strong_buy`, `buy`, `hold`, `sell`, `strong_sell`
+- `sell` and `strong_sell` are currently **exit signals** only — they close existing long positions
+- **Trades table** has `action IN ('buy', 'sell')` — no concept of position type
+- **Portfolio positions** track `quantity > 0` — no notion of negative/short quantity
+- **P&L** is calculated as `(currentPrice - averageCost) * quantity` — only correct for longs
+
+---
+
+## Decision
+
+Add short selling and portfolio hedging as first-class position types, reusing the existing signal pipeline's bearish signals (which currently only trigger exits) to also open short positions.
+
+---
+
+## 1. Type Changes
+
+### `shared/src/types.ts` — New & Modified Types
+
+```typescript
+// NEW: Position type discriminator
+export type PositionType = 'long' | 'short';
+
+// NEW: Hedge category for hedge positions  
+export type HedgeType = 'none' | 'inverse_etf' | 'sector_hedge' | 'market_hedge' | 'pair_trade';
+
+// MODIFIED: TradeAction — add short_open, short_close
+export type TradeAction = 'buy' | 'sell' | 'short_open' | 'short_close';
+
+// MODIFIED: Trade — add position_type and hedge metadata
+export interface Trade {
+  id: number;
+  stockId: number;
+  action: TradeAction;
+  positionType: PositionType;      // NEW
+  quantity: number;
+  pricePerShare: number;
+  totalValue: number;
+  confidence: number;
+  rationale: string;
+  signalSnapshot: string;
+  hedgeType: HedgeType;            // NEW — 'none' for normal trades
+  hedgedPositionId: number | null;  // NEW — links hedge to the position it protects
+  executedAt: string;
+}
+
+// MODIFIED: Position — add position_type and short-specific fields
+export interface Position {
+  id: number;
+  stockId: number;
+  positionType: PositionType;       // NEW
+  quantity: number;
+  averageCost: number;
+  currentPrice: number;
+  marketValue: number;
+  unrealisedPnl: number;
+  unrealisedPnlPct: number;
+  hedgeType: HedgeType;             // NEW
+  hedgedPositionId: number | null;   // NEW
+  borrowCostAccrued: number;         // NEW — simulated borrow fee for shorts
+  openedAt: string;
+  updatedAt: string;
+}
+
+// MODIFIED: PortfolioSnapshot — add short/hedge exposure
+export interface PortfolioSnapshot {
+  id: number;
+  totalValue: number;
+  cashBalance: number;
+  investedValue: number;
+  longExposure: number;              // NEW
+  shortExposure: number;             // NEW
+  hedgeExposure: number;             // NEW
+  netExposure: number;               // NEW (long - short - hedge)
+  totalPnl: number;
+  totalPnlPct: number;
+  positionCount: number;
+  snapshotAt: string;
+}
+
+// NEW: Portfolio-level risk metrics for hedge decisions
+export interface PortfolioRiskMetrics {
+  longExposure: number;
+  shortExposure: number;
+  hedgeExposure: number;
+  netExposure: number;
+  grossExposure: number;
+  netExposurePct: number;          // net / totalValue — target: 40-80%
+  hedgeRatio: number;              // hedgeExposure / longExposure
+  sectorConcentration: Record<string, number>;  // sector → % of portfolio
+  maxSectorPct: number;
+  portfolioBeta: number;           // estimated from position betas
+}
+
+// NEW: Short/hedge recommendation from signal analysis
+export interface DirectionalRecommendation {
+  action: 'long_open' | 'short_open' | 'hedge_open' | 'hold' | 'close';
+  conviction: number;              // 0–1
+  reasoning: string;
+  hedgeType?: HedgeType;
+  targetSymbol?: string;           // for pair trades / inverse ETFs
+}
+```
+
+### `server/src/types.ts` — New Config Fields
+
+```typescript
+export interface SchedulerConfig {
+  // ... existing fields ...
+  
+  // Short selling config
+  enableShorts: boolean;
+  minShortConfidence: number;       // minimum bearish confidence to open short (default: 0.65)
+  maxShortPositionPct: number;      // max % of portfolio in a single short (default: 0.10)
+  maxTotalShortExposurePct: number; // max total short exposure as % of portfolio (default: 0.30)
+  shortStopLossPct: number;         // stop-loss for shorts — price UP (default: 10%)
+  simulatedBorrowRateAnnual: number; // annual borrow cost for short simulation (default: 0.02)
+  
+  // Hedging config
+  enableHedging: boolean;
+  targetNetExposurePct: number;     // target net exposure 40-80% (default: 0.60)
+  maxHedgeExposurePct: number;      // max hedge size as % of portfolio (default: 0.25)
+  hedgeTriggerBeta: number;         // trigger hedge when portfolio beta > this (default: 1.3)
+  sectorConcentrationLimit: number; // trigger sector hedge when > this % (default: 0.30)
+}
+
+export const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
+  // ... existing values ...
+  
+  enableShorts: true,
+  minShortConfidence: 0.65,
+  maxShortPositionPct: 0.10,
+  maxTotalShortExposurePct: 0.30,
+  shortStopLossPct: 10,
+  simulatedBorrowRateAnnual: 0.02,
+  
+  enableHedging: true,
+  targetNetExposurePct: 0.60,
+  maxHedgeExposurePct: 0.25,
+  hedgeTriggerBeta: 1.3,
+  sectorConcentrationLimit: 0.30,
+};
+```
+
+---
+
+## 2. Database Schema Changes
+
+### Migration SQL (Muldoon implements in `schema.ts` safe-migration pattern)
+
+```sql
+-- ─── trades table: add position_type, hedge columns ────────────
+ALTER TABLE trades ADD COLUMN position_type TEXT NOT NULL DEFAULT 'long'
+  CHECK (position_type IN ('long', 'short'));
+ALTER TABLE trades ADD COLUMN hedge_type TEXT NOT NULL DEFAULT 'none'
+  CHECK (hedge_type IN ('none', 'inverse_etf', 'sector_hedge', 'market_hedge', 'pair_trade'));
+ALTER TABLE trades ADD COLUMN hedged_position_id INTEGER REFERENCES portfolio_positions(id);
+
+-- Update action CHECK constraint (requires table rebuild in SQLite)
+-- Muldoon: use the safe-migration pattern — add new columns, keep old check
+-- The action column CHECK must be widened to include 'short_open' and 'short_close'.
+-- Since SQLite doesn't support ALTER CHECK, handle this in application code validation.
+
+-- ─── portfolio_positions: add position_type, hedge, borrow columns ──
+ALTER TABLE portfolio_positions ADD COLUMN position_type TEXT NOT NULL DEFAULT 'long'
+  CHECK (position_type IN ('long', 'short'));
+ALTER TABLE portfolio_positions ADD COLUMN hedge_type TEXT NOT NULL DEFAULT 'none'
+  CHECK (hedge_type IN ('none', 'inverse_etf', 'sector_hedge', 'market_hedge', 'pair_trade'));
+ALTER TABLE portfolio_positions ADD COLUMN hedged_position_id INTEGER;
+ALTER TABLE portfolio_positions ADD COLUMN borrow_cost_accrued REAL NOT NULL DEFAULT 0;
+
+-- Drop the UNIQUE constraint on stock_id (need separate long & short positions per stock)
+-- SQLite limitation: requires table rebuild. Muldoon should create new table and migrate data.
+-- New unique constraint: UNIQUE(stock_id, position_type)
+
+-- ─── portfolio_snapshots: add exposure columns ──────────────────
+ALTER TABLE portfolio_snapshots ADD COLUMN long_exposure REAL NOT NULL DEFAULT 0;
+ALTER TABLE portfolio_snapshots ADD COLUMN short_exposure REAL NOT NULL DEFAULT 0;
+ALTER TABLE portfolio_snapshots ADD COLUMN hedge_exposure REAL NOT NULL DEFAULT 0;
+ALTER TABLE portfolio_snapshots ADD COLUMN net_exposure REAL NOT NULL DEFAULT 0;
+
+-- ─── New table: hedge_rules (portfolio-level hedge configuration) ──
+CREATE TABLE IF NOT EXISTS hedge_rules (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  trigger_type    TEXT NOT NULL CHECK (trigger_type IN (
+    'high_beta', 'sector_concentration', 'market_downturn', 'manual')),
+  trigger_value   REAL NOT NULL,
+  hedge_instrument TEXT NOT NULL,   -- e.g., 'SH' (inverse S&P500 ETF), sector ETF symbol
+  hedge_type      TEXT NOT NULL CHECK (hedge_type IN (
+    'inverse_etf', 'sector_hedge', 'market_hedge', 'pair_trade')),
+  target_pct      REAL NOT NULL,   -- target size as % of triggering exposure
+  is_active       INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Seed default hedge rules
+INSERT OR IGNORE INTO hedge_rules (id, trigger_type, trigger_value, hedge_instrument, hedge_type, target_pct)
+VALUES
+  (1, 'high_beta', 1.3, 'SH', 'inverse_etf', 0.15),
+  (2, 'market_downturn', -0.3, 'SH', 'market_hedge', 0.20),
+  (3, 'sector_concentration', 0.30, 'XLP', 'sector_hedge', 0.10);
+```
+
+### Portfolio Positions Table Rebuild (critical)
+
+Because SQLite doesn't support dropping the UNIQUE constraint on `stock_id`, Muldoon must rebuild the table:
+
+```sql
+-- 1. Create new table with correct constraints
+CREATE TABLE portfolio_positions_new (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  stock_id          INTEGER NOT NULL REFERENCES stocks(id),
+  position_type     TEXT    NOT NULL DEFAULT 'long' CHECK (position_type IN ('long', 'short')),
+  quantity          REAL    NOT NULL CHECK (quantity >= 0),
+  average_cost      REAL    NOT NULL,
+  current_price     REAL    NOT NULL DEFAULT 0,
+  market_value      REAL    NOT NULL DEFAULT 0,
+  unrealised_pnl    REAL    NOT NULL DEFAULT 0,
+  unrealised_pnl_pct REAL   NOT NULL DEFAULT 0,
+  hedge_type        TEXT    NOT NULL DEFAULT 'none',
+  hedged_position_id INTEGER,
+  borrow_cost_accrued REAL  NOT NULL DEFAULT 0,
+  opened_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(stock_id, position_type)
+);
+
+-- 2. Migrate existing data
+INSERT INTO portfolio_positions_new 
+  (id, stock_id, position_type, quantity, average_cost, current_price, 
+   market_value, unrealised_pnl, unrealised_pnl_pct, opened_at, updated_at)
+SELECT id, stock_id, 'long', quantity, average_cost, current_price,
+       market_value, unrealised_pnl, unrealised_pnl_pct, opened_at, updated_at
+FROM portfolio_positions;
+
+-- 3. Drop old, rename new
+DROP TABLE portfolio_positions;
+ALTER TABLE portfolio_positions_new RENAME TO portfolio_positions;
+CREATE INDEX IF NOT EXISTS idx_positions_stock ON portfolio_positions(stock_id);
+CREATE INDEX IF NOT EXISTS idx_positions_type ON portfolio_positions(position_type);
+```
+
+---
+
+## 3. Signal Pipeline Changes (Malcolm)
+
+### 3a. Bearish Signal Scoring
+
+The signal pipeline already produces bearish directions and low scores (0–30 range = bearish). Currently these only trigger sell/strong_sell exits. We now need to **also** produce short entry recommendations.
+
+**Key change in `signals/index.ts`:** Add a `shortRecommendation` field to `AggregateSignalResult`:
+
+```typescript
+export interface AggregateSignalResult {
+  // ... existing fields ...
+  
+  // NEW: Separate short recommendation derived from the same signals
+  shortRecommendation: {
+    shouldShort: boolean;
+    conviction: number;        // 0–1, how confident we are in the bearish thesis
+    reasoning: string;
+    // Bearish score: 0 = no short case, 100 = max bearish conviction
+    bearishScore: number;      // inverted from overallScore: 100 - overallScore
+  };
+}
+```
+
+**Logic:**
+- `bearishScore = 100 - overallScore` (a stock scoring 15/100 bullish has 85/100 bearish conviction)
+- `shouldShort = true` when:
+  - `bearishScore >= 70` (equivalent to overallScore ≤ 30)
+  - `overallConfidence >= 0.65` (signals agree it's bearish)
+  - `recommendation` is `sell` or `strong_sell`
+  - At least 3 out of 4 signals are bearish-leaning (score < 40)
+
+**No changes to individual signal analyzers** — they already produce the full bullish/bearish spectrum. The change is in aggregation interpretation only.
+
+### 3b. Hedge Trigger Signals
+
+New function in signals pipeline (Malcolm creates `server/src/services/signals/hedgeSignal.ts`):
+
+```typescript
+export interface HedgeAssessment {
+  shouldHedge: boolean;
+  hedgeType: HedgeType;
+  hedgeInstrument: string;    // e.g., 'SH', 'PSQ', sector inverse ETF
+  hedgeSizePct: number;       // recommended hedge as % of portfolio
+  triggers: string[];          // which conditions fired
+  reasoning: string;
+}
+
+export function assessHedgeNeed(
+  riskMetrics: PortfolioRiskMetrics,
+  marketSignals: AggregateSignalResult,  // broad market signal (e.g., SPY analysis)
+): HedgeAssessment;
+```
+
+**Hedge triggers (checked after every analysis cycle):**
+
+| Trigger | Condition | Action |
+|---|---|---|
+| High portfolio beta | `portfolioBeta > 1.3` | Open inverse S&P ETF (SH) at 15% of long exposure |
+| Market downturn signal | SPY/QQQ composite score < 30 AND confidence > 0.6 | Open market hedge (SH/PSQ) at 20% of long exposure |
+| Sector concentration | Any sector > 30% of portfolio | Open inverse sector ETF at 10% of sector exposure |
+| Net exposure too high | `netExposurePct > 0.80` | Open broad market hedge to bring net down to 60% |
+
+### 3c. Market Sentiment Overlay
+
+Malcolm adds a **broad market analysis** step to the pipeline that runs SPY/QQQ through the existing signal analyzers. This market-level signal:
+- Provides the `marketSignals` input for hedge assessment
+- Adds a market-regime context to individual stock analysis (risk-off = tighter buy thresholds, looser short thresholds)
+
+---
+
+## 4. Trading Engine Changes (Muldoon)
+
+### 4a. New Function: `shouldShort()`
+
+```typescript
+export function shouldShort(
+  symbol: string,
+  evaluation: EvaluationResult,
+  currentPrice: number,
+  assetType: string = 'stock'
+): TradeDecision {
+  // Guard: shorts disabled
+  if (!config.enableShorts) return noTrade('Shorts disabled');
+  
+  // Guard: no shorting ETFs (we use inverse ETFs for hedging instead)
+  if (assetType === 'etf') return noTrade('ETFs not shortable — use inverse ETFs');
+  
+  // Guard: already short this stock
+  if (existingShortPosition(symbol)) return noTrade('Already short');
+  
+  // Guard: already long this stock (can't be long and short same stock)
+  if (existingLongPosition(symbol)) return noTrade('Already long — close long first');
+  
+  // Require bearish conviction
+  if (evaluation.compositeScore > -0.3) return noTrade('Not bearish enough');
+  if (evaluation.confidence < config.minShortConfidence) return noTrade('Confidence too low');
+  if (evaluation.recommendation !== 'sell' && evaluation.recommendation !== 'strong_sell')
+    return noTrade('Not a sell/strong_sell recommendation');
+  
+  // Check total short exposure limit
+  const totalShortExposure = getTotalShortExposure();
+  const portfolioValue = getPortfolioValue();
+  if (totalShortExposure / portfolioValue >= config.maxTotalShortExposurePct)
+    return noTrade('Max total short exposure reached');
+  
+  // Position sizing: smaller than longs, max 10% of portfolio
+  const maxShortValue = portfolioValue * config.maxShortPositionPct;
+  // Conviction tiers for shorts (more conservative)
+  const convictionMultiplier = evaluation.confidence >= 0.85 ? 1.0
+    : evaluation.confidence >= 0.75 ? 0.75
+    : 0.50;
+  
+  const targetValue = Math.min(maxShortValue * convictionMultiplier, availableCash * 0.5);
+  const quantity = Math.floor(targetValue / currentPrice);
+  
+  return { shouldTrade: true, action: 'short_open', quantity, reason: '...' };
+}
+```
+
+### 4b. New Function: `shouldCoverShort()`
+
+```typescript
+export function shouldCoverShort(
+  symbol: string,
+  evaluation: EvaluationResult,
+  currentPrice: number
+): TradeDecision {
+  const position = getShortPosition(symbol);
+  if (!position) return noTrade('No short position');
+  
+  // P&L for shorts is INVERTED: profit when price drops
+  const pnlPct = ((position.average_cost - currentPrice) / position.average_cost) * 100;
+  
+  // Stop-loss: price went UP too much (default: +10%)
+  if (pnlPct <= -config.shortStopLossPct)
+    return { shouldTrade: true, action: 'short_close', quantity: position.quantity,
+             reason: 'SHORT STOP-LOSS: price up too much' };
+  
+  // Take profit: short thesis played out (price dropped 15%+)
+  if (pnlPct >= 15)
+    return { shouldTrade: true, action: 'short_close', quantity: position.quantity,
+             reason: 'SHORT TAKE-PROFIT: target reached' };
+  
+  // Thesis invalidated: signals turned bullish
+  if (evaluation.recommendation === 'buy' || evaluation.recommendation === 'strong_buy')
+    return { shouldTrade: true, action: 'short_close', quantity: position.quantity,
+             reason: 'Short thesis invalidated — signals now bullish' };
+  
+  return noTrade('Holding short');
+}
+```
+
+### 4c. Modified: `executeTrade()` — Handle Short Actions
+
+```typescript
+export function executeTrade(order: TradeOrder): number {
+  // order.action is now 'buy' | 'sell' | 'short_open' | 'short_close'
+  
+  if (order.action === 'short_open') {
+    // 1. Insert trade record with position_type='short'
+    // 2. Cash: +totalValue (receive sale proceeds — simulated margin)
+    // 3. Create portfolio_position with position_type='short', quantity > 0
+    // 4. P&L calculation: (averageCost - currentPrice) * quantity (inverted)
+  }
+  
+  if (order.action === 'short_close') {
+    // 1. Insert trade record with position_type='short', action='short_close'
+    // 2. Cash: -totalValue (buy back shares to close)
+    // 3. Add accrued borrow costs to P&L
+    // 4. Close portfolio_position (set quantity = 0)
+  }
+  
+  // Existing buy/sell logic unchanged for long positions
+}
+```
+
+### 4d. New Function: `executeHedge()` — Portfolio-Level Hedging
+
+```typescript
+export function executeHedge(assessment: HedgeAssessment): number | null {
+  if (!assessment.shouldHedge || !config.enableHedging) return null;
+  
+  const portfolioValue = getPortfolioValue();
+  const hedgeValue = portfolioValue * assessment.hedgeSizePct;
+  
+  // Look up or create the hedge instrument (inverse ETF) in stocks table
+  const hedgeStock = ensureStockExists(assessment.hedgeInstrument, 'etf');
+  const hedgePrice = getCurrentPrice(assessment.hedgeInstrument);
+  const quantity = Math.floor(hedgeValue / hedgePrice);
+  
+  if (quantity <= 0) return null;
+  
+  // Execute as a regular BUY of the inverse ETF, tagged as a hedge
+  return executeTrade({
+    stockId: hedgeStock.id,
+    symbol: assessment.hedgeInstrument,
+    action: 'buy',
+    positionType: 'long',          // buying an inverse ETF is a long position
+    quantity,
+    pricePerShare: hedgePrice,
+    confidence: 0.70,
+    rationale: `HEDGE: ${assessment.reasoning}`,
+    signalSnapshot: JSON.stringify({ triggers: assessment.triggers }),
+    hedgeType: assessment.hedgeType,
+    hedgedPositionId: null,        // portfolio-level hedge, not position-specific
+  });
+}
+```
+
+### 4e. Borrow Cost Simulation
+
+```typescript
+// Called daily by scheduler, accrues borrow cost on all short positions
+export function accrueBorrowCosts(): void {
+  const shorts = db.prepare(
+    "SELECT * FROM portfolio_positions WHERE position_type = 'short' AND quantity > 0"
+  ).all();
+  
+  const dailyRate = config.simulatedBorrowRateAnnual / 365;
+  
+  for (const pos of shorts) {
+    const dailyCost = pos.market_value * dailyRate;
+    db.prepare(`
+      UPDATE portfolio_positions 
+      SET borrow_cost_accrued = borrow_cost_accrued + ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(dailyCost, pos.id);
+  }
+}
+```
+
+---
+
+## 5. Portfolio Tracker Changes (Muldoon)
+
+### Modified `getPortfolio()`
+
+```typescript
+// Query now returns both long and short positions
+const positions = db.prepare(`
+  SELECT pp.*, s.symbol, s.name, s.market, s.sector
+  FROM portfolio_positions pp
+  JOIN stocks s ON s.id = pp.stock_id
+  WHERE pp.quantity > 0
+  ORDER BY pp.position_type, pp.market_value DESC
+`).all();
+
+// P&L calculation differs by position type
+for (const p of positions) {
+  if (p.position_type === 'short') {
+    p.unrealised_pnl = (p.average_cost - p.current_price) * p.quantity - p.borrow_cost_accrued;
+    p.unrealised_pnl_pct = p.average_cost > 0 
+      ? ((p.average_cost - p.current_price) / p.average_cost) * 100 : 0;
+  }
+  // Long P&L unchanged
+}
+```
+
+### Modified `takeSnapshot()`
+
+```typescript
+// Calculate exposure breakdown
+const longPositions = positions.filter(p => p.position_type === 'long' && p.hedge_type === 'none');
+const shortPositions = positions.filter(p => p.position_type === 'short');
+const hedgePositions = positions.filter(p => p.hedge_type !== 'none');
+
+const longExposure = sum(longPositions, 'market_value');
+const shortExposure = sum(shortPositions, 'market_value');
+const hedgeExposure = sum(hedgePositions, 'market_value');
+const netExposure = longExposure - shortExposure - hedgeExposure;
+
+db.prepare(`
+  INSERT INTO portfolio_snapshots
+    (total_value, cash_balance, invested_value, total_pnl, total_pnl_pct,
+     position_count, long_exposure, short_exposure, hedge_exposure, net_exposure)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run(...);
+```
+
+### New: `getPortfolioRiskMetrics()`
+
+```typescript
+export function getPortfolioRiskMetrics(): PortfolioRiskMetrics {
+  // Aggregate long/short/hedge exposure
+  // Calculate sector concentration from positions
+  // Estimate portfolio beta from individual stock betas (stored in stocks table)
+  // Return risk metrics for hedge assessment
+}
+```
+
+---
+
+## 6. Pipeline Integration (Muldoon)
+
+### Modified Analysis Cycle in `scheduler.ts`
+
+```typescript
+async function runAnalysisCycle() {
+  // 1. Existing: Analyze all tracked stocks (produces bullish/bearish signals)
+  
+  // 2. NEW: For each stock with strong bearish signals, evaluate short opportunity
+  for (const result of analysisResults) {
+    // Existing: Check shouldBuy() for long entry
+    // Existing: Check shouldSell() for long exit
+    
+    // NEW: Check shouldShort() for short entry
+    if (result.shortRecommendation.shouldShort) {
+      const shortDecision = shouldShort(stock.symbol, evaluation, currentPrice, stock.assetType);
+      if (shortDecision.shouldTrade) executeTrade(shortOrder);
+    }
+    
+    // NEW: Check shouldCoverShort() for short exit
+    const coverDecision = shouldCoverShort(stock.symbol, evaluation, currentPrice);
+    if (coverDecision.shouldTrade) executeTrade(coverOrder);
+  }
+  
+  // 3. NEW: Run broad market analysis (SPY/QQQ)
+  const marketSignals = await analyzeAsset(spyStock, spyMarketData);
+  
+  // 4. NEW: Assess hedge need
+  const riskMetrics = getPortfolioRiskMetrics();
+  const hedgeAssessment = assessHedgeNeed(riskMetrics, marketSignals);
+  if (hedgeAssessment.shouldHedge) executeHedge(hedgeAssessment);
+  
+  // 5. NEW: Accrue daily borrow costs on shorts
+  accrueBorrowCosts();
+}
+```
+
+---
+
+## 7. UI Changes (Ellie)
+
+### 7a. Portfolio Page
+
+- **Position list**: Add `Position Type` column with pill badges: `LONG` (green), `SHORT` (red), `HEDGE` (blue)
+- **P&L display**: Short P&L shows correctly (green when price dropped, red when price rose)
+- **Exposure bar**: New horizontal stacked bar showing long / short / hedge / cash breakdown
+- **Net exposure indicator**: Show net exposure % with color coding (green 40-60%, yellow 60-80%, red >80%)
+
+### 7b. Dashboard
+
+- **Summary cards**: Add "Short Positions" count and "Hedge Positions" count
+- **Exposure breakdown**: New card showing Long / Short / Net exposure
+- **Risk metrics**: Show portfolio beta, sector concentration warnings
+
+### 7c. Trades Page
+
+- **Trade action column**: Show `BUY`, `SELL`, `SHORT`, `COVER` with color-coded badges
+- **Position type filter**: Add filter for Long/Short/Hedge trades
+- **P&L column**: Handle inverted P&L display for short trades
+
+### 7d. New: Risk Dashboard Panel
+
+- Net exposure over time chart (from snapshot data)
+- Sector concentration pie chart
+- Active hedges list with trigger reason
+- Short position summary with borrow costs accrued
+
+---
+
+## 8. Risk Management Rules
+
+### Short Selling Guardrails
+1. **Max single short**: 10% of portfolio (vs 15% for longs) — shorts have unlimited loss potential
+2. **Max total short exposure**: 30% of portfolio — prevents overleverage
+3. **Stop-loss**: +10% price increase triggers automatic cover (vs -8% for longs)
+4. **No shorting ETFs**: Use inverse ETFs for broad/sector bets instead
+5. **No simultaneous long+short**: Can't be long and short the same symbol
+6. **Minimum confidence**: 65% bearish confidence required (higher than 55% for longs)
+7. **Simulated borrow cost**: 2% annually deducted from short P&L (realism)
+
+### Hedging Guardrails
+1. **Max hedge exposure**: 25% of portfolio
+2. **Target net exposure**: 60% (40% minimum, 80% maximum before auto-hedge triggers)
+3. **Hedge instruments**: Only established inverse ETFs (SH, PSQ, SDS for 2x)
+4. **Auto-unwind**: Hedges auto-close when trigger conditions clear (beta normalizes, market recovers)
+5. **No hedge-on-hedge**: Don't hedge a hedge position
+
+---
+
+## 9. File Change Summary — Per Agent
+
+### Malcolm (Data Engineer / Signal Pipeline)
+| File | Change |
+|---|---|
+| `server/src/services/signals/index.ts` | Add `shortRecommendation` to `AggregateSignalResult`, compute bearish score |
+| `server/src/services/signals/hedgeSignal.ts` | **NEW** — `assessHedgeNeed()` function |
+| `server/src/services/signals/marketRegime.ts` | **NEW** — Broad market analysis (SPY/QQQ sentiment) |
+| `shared/src/types.ts` | Add `PositionType`, `HedgeType`, `PortfolioRiskMetrics`, `DirectionalRecommendation` types |
+
+### Muldoon (Backend Dev)
+| File | Change |
+|---|---|
+| `server/src/db/schema.ts` | Schema migration: new columns on trades, portfolio_positions, portfolio_snapshots; new `hedge_rules` table; portfolio_positions table rebuild |
+| `server/src/types.ts` | Add short/hedge config fields to `SchedulerConfig` |
+| `server/src/services/tradingEngine.ts` | Add `shouldShort()`, `shouldCoverShort()`, `executeHedge()`, `accrueBorrowCosts()`; modify `executeTrade()` for short actions |
+| `server/src/services/portfolioTracker.ts` | Modify P&L for shorts, add exposure breakdown to snapshots, add `getPortfolioRiskMetrics()` |
+| `server/src/services/scheduler.ts` | Integrate short/hedge evaluation into analysis cycle |
+| `server/src/index.ts` | Add API endpoints: `GET /api/portfolio/risk`, `GET /api/hedges` |
+| `shared/src/types.ts` | Update `Trade`, `Position`, `PortfolioSnapshot`, `TradeAction` types |
+
+### Ellie (Frontend Dev)
+| File | Change |
+|---|---|
+| Portfolio page component | Position type badges, inverted P&L for shorts, exposure bar |
+| Dashboard component | Short/hedge position counts, exposure breakdown card |
+| Trades page component | Short/cover action badges, position type filter |
+| Risk dashboard panel | **NEW** — Net exposure chart, sector concentration, active hedges |
+| API client | Update types for new fields |
+
+---
+
+## 10. Implementation Order
+
+1. **Phase 1 — Schema & Types** (Muldoon + Malcolm in parallel)
+   - Muldoon: schema migration, type updates
+   - Malcolm: shared type additions
+
+2. **Phase 2 — Short Selling** (Muldoon, then Malcolm)
+   - Muldoon: `shouldShort()`, `shouldCoverShort()`, modified `executeTrade()`
+   - Malcolm: `shortRecommendation` in signal aggregation
+
+3. **Phase 3 — Hedging** (Malcolm, then Muldoon)
+   - Malcolm: `hedgeSignal.ts`, `marketRegime.ts`
+   - Muldoon: `executeHedge()`, hedge integration in scheduler
+
+4. **Phase 4 — Portfolio & Risk** (Muldoon)
+   - Modified P&L, exposure tracking, `getPortfolioRiskMetrics()`
+
+5. **Phase 5 — UI** (Ellie)
+   - Position type display, exposure bar, risk dashboard
+
+---
+
+## Open Questions
+
+1. **Margin simulation**: Do we simulate margin requirements for shorts, or just track them as virtual positions? **Recommendation: Virtual positions with borrow cost only** — keeps it simple while adding realism.
+
+2. **Inverse ETF selection**: Should we hardcode SH/PSQ/SDS or allow user configuration? **Recommendation: Seed defaults in `hedge_rules` table, allow future UI configuration.**
+
+3. **Learning engine**: How should the learning engine evaluate short trade accuracy? **Recommendation: Same framework — expected vs actual return, but with inverted P&L formula.**
+
+
+---
+
+### Multi-Strategy Trading Architecture (2026-04-22)
+
+**Author:** Grant (Lead / Architect)
+**Status:** Proposed
+**Date:** 2026-04-22
+
+# Multi-Strategy Trading Architecture
+
+**Author:** Grant (Lead / Architect)  
+**Date:** 2025-07-19  
+**Status:** Proposed  
+**Requested by:** Jan G.  
+**Scope:** Complete redesign of APEX from single-pipeline to three independent strategy engines
+
+---
+
+## Executive Summary
+
+APEX currently runs a single signal pipeline that treats all assets the same way, with asset-type branching (stock vs ETF) bolted on after the fact. The current system has several architectural weaknesses:
+
+1. **One-size-fits-all scoring** — Momentum stocks and long-term ETFs use similar time horizons and confidence thresholds
+2. **No strategy isolation** — A momentum play and a value pick compete for the same capital pool with the same risk rules
+3. **Limited data sources** — Relies heavily on Finnhub news + Yahoo Finance; no macro data, no real social data, no FRED integration
+4. **Single cadence** — Everything runs on the same 4-hour cron; breaking news needs minutes, macro rebalancing needs weeks
+
+This document designs a three-strategy architecture where each strategy is an independent engine with its own signal pipeline, risk budget, execution cadence, and performance tracking.
+
+---
+
+## 1. Strategy Framework — Capital Allocation & Coexistence
+
+### 1.1 Strategy Definitions
+
+| Strategy | ID | Asset Types | Holding Period | Cadence | Capital Allocation |
+|---|---|---|---|---|---|
+| **Momentum/News Trader** | `momentum` | Stocks | Hours to days | Real-time (5-min poll) + reactive | 25% of portfolio |
+| **Value/Contrarian** | `value` | Stocks | Weeks to months | Every 4 hours | 35% of portfolio |
+| **Macro ETF Strategist** | `macro_etf` | ETFs | Months | Daily analysis, monthly rebalance | 40% of portfolio |
+
+### 1.2 Capital Allocation Model
+
+```typescript
+export interface StrategyAllocation {
+  strategyId: StrategyType;
+  targetPct: number;        // target % of total portfolio
+  minPct: number;           // floor — never go below this
+  maxPct: number;           // ceiling — never exceed this
+  currentPct: number;       // calculated from open positions
+  cashReservePct: number;   // strategy-specific cash buffer
+}
+
+export type StrategyType = 'momentum' | 'value' | 'macro_etf';
+
+export const DEFAULT_STRATEGY_ALLOCATIONS: Record<StrategyType, StrategyAllocation> = {
+  momentum: {
+    strategyId: 'momentum',
+    targetPct: 0.25,
+    minPct: 0.10,
+    maxPct: 0.35,
+    currentPct: 0,
+    cashReservePct: 0.20,   // momentum needs dry powder for fast entries
+  },
+  value: {
+    strategyId: 'value',
+    targetPct: 0.35,
+    minPct: 0.20,
+    maxPct: 0.45,
+    currentPct: 0,
+    cashReservePct: 0.10,   // value is patient; less cash buffer needed
+  },
+  macro_etf: {
+    strategyId: 'macro_etf',
+    targetPct: 0.40,
+    minPct: 0.25,
+    maxPct: 0.50,
+    currentPct: 0,
+    cashReservePct: 0.05,   // ETFs are fully invested by design
+  },
+};
+```
+
+### 1.3 Cross-Strategy Guardrails
+
+- **Total portfolio cash reserve:** Never below 10% (unchanged)
+- **Strategy drift rebalance:** If any strategy drifts >5% from target allocation, soft-rebalance on next cycle by directing new capital to the underweight strategy
+- **Hard rebalance:** If drift >10%, actively trim the overweight strategy
+- **Correlation guard:** If momentum + value both hold the same sector >40% combined, flag for manual review
+- **Drawdown circuit breaker:** If total portfolio drops >15% from peak, all strategies pause new entries for 24 hours
+
+---
+
+## 2. Signal Pipeline Redesign
+
+### 2.1 Strategy 1: Momentum/News Trader
+
+**Philosophy:** Capture short-term dislocations from breaking news, social buzz, and volume spikes. Speed matters more than precision.
+
+```typescript
+export const MOMENTUM_SIGNAL_PIPELINE: StrategySignalConfig[] = [
+  { source: 'news_velocity',      weight: 0.30, analyzer: analyzeNewsVelocity },
+  { source: 'social_buzz',        weight: 0.25, analyzer: analyzeSocialBuzz },
+  { source: 'volume_spike',       weight: 0.20, analyzer: analyzeVolumeSpike },
+  { source: 'price_momentum',     weight: 0.15, analyzer: analyzePriceMomentum },
+  { source: 'search_acceleration', weight: 0.10, analyzer: analyzeSearchAcceleration },
+];
+```
+
+**New signal modules to create:**
+
+#### `newsVelocitySignal.ts`
+```typescript
+export interface NewsVelocityData {
+  headlineCount1h: number;    // headlines in last hour
+  headlineCount24h: number;   // headlines in last 24 hours
+  velocityRatio: number;      // 1h_count / (24h_count / 24) — how much faster than normal
+  avgSentiment1h: number;     // recent sentiment
+  sentimentAcceleration: number; // sentiment change vs 24h avg
+  hasEarningsKeyword: boolean;
+  hasFdaKeyword: boolean;
+  hasAcquisitionKeyword: boolean;
+}
+
+export async function analyzeNewsVelocity(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Score 0-100:
+// - velocityRatio > 5x → 80+ (news explosion)
+// - velocityRatio > 3x → 65-80 (elevated attention)
+// - Earnings/FDA/acquisition keywords → +10 bonus
+// - Sentiment alignment with velocity → confidence boost
+// - Confidence based on: article count (need >3 in 1h for reliable signal)
+```
+
+#### `socialBuzzSignal.ts`
+```typescript
+// Phase 1: Reddit API (free tier: 100 requests/min)
+// Subreddits: r/wallstreetbets, r/stocks, r/investing, r/options
+// Phase 2: StockTwits API (free, no auth required for public feed)
+export interface SocialBuzzData {
+  mentionCount24h: number;
+  mentionCountPrev24h: number;
+  buzzAcceleration: number;     // mentionCount24h / mentionCountPrev24h
+  sentimentRatio: number;       // positive / (positive + negative)
+  topPosts: { title: string; score: number; subreddit: string }[];
+}
+
+export async function analyzeSocialBuzz(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Score 0-100:
+// - buzzAcceleration > 3x → 75+ (viral attention)
+// - High sentiment ratio + acceleration → 85+
+// - Falling buzz → 30-40 (hype dying)
+// - Confidence: min 5 mentions for any signal; 20+ for high confidence
+```
+
+#### `volumeSpikeSignal.ts`
+```typescript
+export async function analyzeVolumeSpike(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Uses existing volumeHistory from MarketData
+// Score 0-100:
+// - Volume > 3x 20-day avg + price up → 80+ (institutional buying)
+// - Volume > 3x 20-day avg + price down → 20 (distribution)
+// - Volume > 2x avg → moderate signal
+// - Confidence: based on how many days of volume data available
+```
+
+#### `priceMomentumSignal.ts` (replaces generic trendSignal for momentum strategy)
+```typescript
+export async function analyzePriceMomentum(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Short-term focused (5-day, 10-day windows, NOT 50/200 SMA)
+// Score 0-100:
+// - 5-day return > +5% → 75+
+// - RSI(14) > 70 → overbought warning (reduce score by 10)
+// - RSI(14) < 30 → oversold bounce candidate (contrarian +15)
+// - Price vs VWAP (if intraday data available)
+// - Confidence: higher when price + volume + news align
+```
+
+### 2.2 Strategy 2: Value/Contrarian Investor
+
+**Philosophy:** Find fundamentally undervalued stocks where the market overreacted. Patience and discipline.
+
+```typescript
+export const VALUE_SIGNAL_PIPELINE: StrategySignalConfig[] = [
+  { source: 'fundamental_value',   weight: 0.35, analyzer: analyzeFundamentalValue },
+  { source: 'contrarian_sentiment', weight: 0.20, analyzer: analyzeContrarianSentiment },
+  { source: 'mean_reversion',      weight: 0.20, analyzer: analyzeMeanReversion },
+  { source: 'insider_activity',    weight: 0.15, analyzer: analyzeInsiderActivity },
+  { source: 'quality_score',       weight: 0.10, analyzer: analyzeQualityScore },
+];
+```
+
+#### `fundamentalValueSignal.ts` (enhanced valuationSignal)
+```typescript
+export async function analyzeFundamentalValue(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Extends existing valuationSignal with:
+// - Forward P/E vs trailing P/E (earnings growth implied)
+// - PEG ratio scoring (PEG < 1 = growth at reasonable price)
+// - EV/EBITDA vs sector peers
+// - Free cash flow yield (FCF / market cap)
+// - Price vs analyst consensus target
+// - Dividend yield vs 5-year avg (if data available)
+// Weights: P/E 20%, PEG 20%, EV/EBITDA 15%, FCF Yield 15%, P/B 10%, Analyst Target 10%, Dividend 10%
+```
+
+#### `contrarianSentimentSignal.ts`
+```typescript
+export async function analyzeContrarianSentiment(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// INVERTED sentiment logic — buy when everyone is selling
+// Score 0-100:
+// - Extremely negative news sentiment + solid fundamentals → 80+ (contrarian buy)
+// - Extremely positive sentiment + rich valuation → 20 (contrarian sell)
+// - Use news + social + search interest as inputs
+// - Only high-confidence when fundamentals DISAGREE with sentiment
+// - Must pair with fundamental_value > 55 to fire (hardcoded cross-signal check)
+```
+
+#### `meanReversionSignal.ts`
+```typescript
+export async function analyzeMeanReversion(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Score 0-100:
+// - Price > 2 std deviations below 200-day mean → 85 (strong reversion candidate)
+// - Price > 1 std deviation below → 70
+// - At or above mean → 50 (neutral)
+// - Price > 2 std deviations above → 20 (stretched, avoid)
+// - 52-week position: bottom 20% = bullish, top 20% = bearish
+// - Bollinger Band width → confidence (narrow bands = imminent breakout)
+```
+
+#### `insiderActivitySignal.ts`
+```typescript
+// Data source: SEC EDGAR Form 4 filings (free, public)
+// Endpoint: https://efts.sec.gov/LATEST/search-index?q=<CIK>&dateRange=custom&startdt=...
+export async function analyzeInsiderActivity(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Score 0-100:
+// - Multiple insider buys in 30 days → 80+ (insiders know something)
+// - Single large insider buy → 70
+// - Insider selling (routine) → 50 (neutral; scheduled sales are noise)
+// - Cluster insider selling → 25 (bearish)
+// - Confidence: higher with more filing data points
+```
+
+#### `qualityScoreSignal.ts`
+```typescript
+export async function analyzeQualityScore(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Composite quality metric:
+// - Return on equity > 15% → +20
+// - Debt-to-equity < 0.5 → +20
+// - Profit margin > sector avg → +20
+// - Revenue growth > 0 → +20
+// - Positive free cash flow → +20
+// Base score = 0, add points for each quality flag
+// Confidence: based on data availability (all 5 metrics = 0.85)
+```
+
+### 2.3 Strategy 3: Macro ETF Strategist
+
+**Philosophy:** Top-down allocation based on economic regime. Rotate sectors based on business cycle. Monthly rebalancing.
+
+```typescript
+export const MACRO_ETF_SIGNAL_PIPELINE: StrategySignalConfig[] = [
+  { source: 'macro_regime',        weight: 0.30, analyzer: analyzeMacroRegime },
+  { source: 'yield_curve',         weight: 0.20, analyzer: analyzeYieldCurve },
+  { source: 'sector_rotation',     weight: 0.20, analyzer: analyzeSectorRotation },
+  { source: 'political_risk',      weight: 0.15, analyzer: analyzePoliticalRisk },
+  { source: 'etf_relative_value',  weight: 0.15, analyzer: analyzeETFRelativeValue },
+];
+```
+
+#### `macroRegimeSignal.ts`
+```typescript
+// Data source: FRED API (free, 120 requests/min with API key)
+// Key series: GDP, CPI, unemployment, Fed funds rate, PMI
+export type MacroRegime = 'expansion' | 'slowdown' | 'recession' | 'recovery';
+
+export interface MacroIndicators {
+  cpiYoY: number | null;          // FRED series: CPIAUCSL
+  unemploymentRate: number | null; // FRED series: UNRATE
+  fedFundsRate: number | null;     // FRED series: FEDFUNDS
+  pmiManufacturing: number | null; // ISM PMI
+  gdpGrowthQoQ: number | null;    // FRED series: A191RL1Q225SBEA
+  retailSalesYoY: number | null;   // FRED series: RSAFS
+  consumerSentiment: number | null; // FRED series: UMCSENT
+}
+
+export async function analyzeMacroRegime(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Regime classification:
+// - PMI > 50 + falling unemployment + rising CPI → Expansion
+// - PMI > 50 + rising unemployment + falling CPI → Slowdown
+// - PMI < 50 + rising unemployment → Recession
+// - PMI > 50 (from below) + falling unemployment → Recovery
+//
+// ETF scoring by regime:
+// - Expansion: score growth ETFs high (QQQ, XLK), commodities moderate
+// - Slowdown: score defensive ETFs high (XLU, XLP, GLD)
+// - Recession: score bonds high (TLT, BND), cash-like ETFs, inverse ETFs
+// - Recovery: score cyclicals high (XLF, XLI, XLE), small-caps
+```
+
+#### `yieldCurveSignal.ts`
+```typescript
+// Data: FRED API — 2Y/10Y Treasury spread (T10Y2Y series)
+export async function analyzeYieldCurve(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Score 0-100:
+// - Normal curve (10Y-2Y > 0.5%) → 65 (economy healthy)
+// - Flat curve (spread 0-0.5%) → 45 (caution)
+// - Inverted curve (spread < 0) → 25 (recession signal)
+// - Steepening from inversion → 75 (recovery underway)
+// - Apply to ETFs: inverted → favor TLT, BND; normal → favor SPY, QQQ
+```
+
+#### `sectorRotationSignal.ts`
+```typescript
+// Compare relative performance of sector ETFs over 1m, 3m, 6m
+// Sectors: XLK, XLF, XLE, XLV, XLI, XLP, XLU, XLY, XLC, XLRE, XLB
+export async function analyzeSectorRotation(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Score 0-100 per ETF:
+// - Sector outperforming SPY over 3m → 70+
+// - Sector momentum accelerating (1m > 3m return) → +10
+// - Sector momentum decelerating → -10
+// - Cross-reference with macro regime: favor cyclicals in expansion, defensives in slowdown
+```
+
+#### `politicalRiskSignal.ts`
+```typescript
+// Data: GDELT Project API (free) + curated political RSS feeds
+// Fallback: Finnhub general news filtered for political keywords
+export async function analyzePoliticalRisk(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Keywords: election, regulation, tariff, sanction, trade deal, fiscal, budget, tax
+// Score 0-100:
+// - Pro-business policy news → 65+ for affected sectors
+// - Regulatory crackdown → 30 for affected sectors
+// - Political stability → 55 (slight positive)
+// - Election uncertainty → 40 (risk-off)
+```
+
+#### `etfRelativeValueSignal.ts`
+```typescript
+export async function analyzeETFRelativeValue(
+  stock: Stock,
+  marketData: MarketData,
+): Promise<SignalResult>
+// Adapted from existing etfSignals.ts valuationETF
+// Added: expense ratio awareness, tracking error, AUM size
+// Score favors: low expense ratio, tight tracking, high AUM (liquidity)
+```
+
+---
+
+## 3. Data Source Recommendations
+
+### 3.1 Primary Sources (Free Tier)
+
+| Source | API | What It Provides | Rate Limit | Strategy Use |
+|---|---|---|---|---|
+| **Yahoo Finance** | Unofficial v8/v10 | Quotes, OHLCV, fundamentals, extended stats | ~5 req/s (throttled) | All strategies |
+| **Finnhub** | REST + WebSocket | Company news, general news, sentiment | 60 req/min (free) | Momentum, Value |
+| **FRED** | REST | Macro indicators (CPI, GDP, rates, PMI, yield curve) | 120 req/min (free key) | Macro ETF |
+| **Google Trends** | Unofficial | Search interest, trending topics | Rate-limited | Momentum, Value |
+| **Reddit API** | OAuth2 REST | r/wallstreetbets, r/stocks mentions & sentiment | 100 req/min (free) | Momentum |
+| **SEC EDGAR** | REST | Form 4 insider filings, 13F institutional holdings | 10 req/s | Value |
+| **GDELT** | REST | Global political/geopolitical event tracking | Unlimited | Macro ETF |
+
+### 3.2 Secondary Sources (Affordable Paid Tiers)
+
+| Source | Cost | Value Add |
+|---|---|---|
+| **Alpha Vantage** | Free (25 req/day) → $50/mo | Backup for Yahoo fundamentals, intraday data |
+| **StockTwits** | Free | Real-time trader sentiment, trending tickers |
+| **NewsAPI** | Free (100 req/day) → $50/mo | Broader news coverage, better search |
+| **Twelve Data** | Free (800 req/day) | Backup market data, better intraday |
+
+### 3.3 Fallback Strategy
+
+Every data source has a fallback. If primary fails, degrade gracefully:
+
+```typescript
+export interface DataSourceConfig {
+  primary: string;
+  fallback: string | null;
+  cacheTtlMinutes: number;
+  maxRetries: number;
+  confidencePenaltyOnFallback: number; // reduce confidence when using fallback
+}
+
+export const DATA_SOURCE_CONFIGS: Record<string, DataSourceConfig> = {
+  quotes:       { primary: 'yahoo',    fallback: 'alpha_vantage', cacheTtlMinutes: 5,    maxRetries: 2, confidencePenaltyOnFallback: 0.05 },
+  historical:   { primary: 'yahoo',    fallback: 'twelve_data',   cacheTtlMinutes: 60,   maxRetries: 2, confidencePenaltyOnFallback: 0.05 },
+  fundamentals: { primary: 'yahoo_v10', fallback: 'alpha_vantage', cacheTtlMinutes: 240,  maxRetries: 2, confidencePenaltyOnFallback: 0.10 },
+  news:         { primary: 'finnhub',  fallback: 'newsapi',       cacheTtlMinutes: 15,   maxRetries: 1, confidencePenaltyOnFallback: 0.10 },
+  macro:        { primary: 'fred',     fallback: null,            cacheTtlMinutes: 1440, maxRetries: 3, confidencePenaltyOnFallback: 0 },
+  social:       { primary: 'reddit',   fallback: 'stocktwits',    cacheTtlMinutes: 30,   maxRetries: 1, confidencePenaltyOnFallback: 0.15 },
+  insider:      { primary: 'sec_edgar', fallback: null,            cacheTtlMinutes: 1440, maxRetries: 2, confidencePenaltyOnFallback: 0 },
+  political:    { primary: 'gdelt',    fallback: 'finnhub_filtered', cacheTtlMinutes: 60, maxRetries: 1, confidencePenaltyOnFallback: 0.10 },
+  search:       { primary: 'google_trends', fallback: null,        cacheTtlMinutes: 360,  maxRetries: 1, confidencePenaltyOnFallback: 0 },
+};
+```
+
+### 3.4 New API Modules to Create
+
+```
+server/src/services/apis/
+├── finnhub.ts           ← EXISTS (news, sentiment)
+├── googleTrends.ts      ← EXISTS (search interest)
+├── yahooFundamentals.ts ← EXISTS (fundamentals)
+├── fred.ts              ← NEW: Federal Reserve Economic Data
+├── reddit.ts            ← NEW: Reddit API (social buzz)
+├── stocktwits.ts        ← NEW: StockTwits sentiment feed
+├── secEdgar.ts          ← NEW: SEC EDGAR Form 4 filings
+├── gdelt.ts             ← NEW: GDELT political event API
+├── newsapi.ts           ← NEW: NewsAPI fallback
+└── alphaVantage.ts      ← NEW: Alpha Vantage fallback
+```
+
+---
+
+## 4. Risk Management
+
+### 4.1 Per-Strategy Risk Limits
+
+```typescript
+export interface StrategyRiskConfig {
+  strategyId: StrategyType;
+  maxPositions: number;
+  maxPositionPct: number;       // max % of STRATEGY capital per position
+  maxSectorConcentration: number; // max % in any single sector
+  stopLossPct: number;          // per-position stop loss
+  trailingStopPct: number | null; // trailing stop (null = disabled)
+  minConfidence: number;        // minimum confidence to enter
+  maxDailyTrades: number;       // prevent overtrading
+  cooldownMinutes: number;      // min time between trades on same symbol
+}
+
+export const STRATEGY_RISK_CONFIGS: Record<StrategyType, StrategyRiskConfig> = {
+  momentum: {
+    strategyId: 'momentum',
+    maxPositions: 8,
+    maxPositionPct: 0.15,         // 15% of momentum capital per position
+    maxSectorConcentration: 0.40,
+    stopLossPct: -5,              // tight stops for momentum
+    trailingStopPct: -3,          // 3% trailing stop to lock in gains
+    minConfidence: 0.50,          // lower bar — speed matters
+    maxDailyTrades: 10,
+    cooldownMinutes: 30,          // 30 min between same-symbol trades
+  },
+  value: {
+    strategyId: 'value',
+    maxPositions: 12,
+    maxPositionPct: 0.12,
+    maxSectorConcentration: 0.35,
+    stopLossPct: -12,             // wider stops for value (temporary dips expected)
+    trailingStopPct: null,        // no trailing stop — value holds through dips
+    minConfidence: 0.60,
+    maxDailyTrades: 3,
+    cooldownMinutes: 240,         // 4 hours minimum between same-symbol actions
+  },
+  macro_etf: {
+    strategyId: 'macro_etf',
+    maxPositions: 10,
+    maxPositionPct: 0.20,         // ETFs are diversified; larger positions OK
+    maxSectorConcentration: 0.50, // sector ETFs naturally concentrate
+    stopLossPct: -15,
+    trailingStopPct: null,
+    minConfidence: 0.55,
+    maxDailyTrades: 2,
+    cooldownMinutes: 1440,        // 24h between same-ETF trades
+  },
+};
+```
+
+### 4.2 Portfolio-Level Guards
+
+```typescript
+export interface PortfolioGuards {
+  maxTotalDrawdownPct: number;     // pause ALL strategies if exceeded
+  maxDailyLossPct: number;         // halt trading for the day
+  maxCorrelation: number;          // warn if cross-strategy correlation > this
+  maxTotalPositions: number;       // hard cap across all strategies
+  maxSingleStockExposure: number;  // across ALL strategies combined
+  emergencyLiquidatePct: number;   // force-sell everything if exceeded
+}
+
+export const PORTFOLIO_GUARDS: PortfolioGuards = {
+  maxTotalDrawdownPct: -15,        // 15% from peak → pause new entries 24h
+  maxDailyLossPct: -5,             // 5% daily loss → halt for the day
+  maxCorrelation: 0.80,            // warn if strategies are >80% correlated
+  maxTotalPositions: 25,           // hard cap across all strategies
+  maxSingleStockExposure: 0.12,    // no stock > 12% of TOTAL portfolio (even across strategies)
+  emergencyLiquidatePct: -25,      // 25% drawdown → liquidate to cash, require manual restart
+};
+```
+
+### 4.3 Correlation Management
+
+```typescript
+// Run weekly: measure cross-strategy return correlation
+export async function measureStrategyCorrelation(): Promise<{
+  momentumVsValue: number;
+  momentumVsMacro: number;
+  valueVsMacro: number;
+  alert: boolean;
+}>
+// If correlations are high, strategies are not diversifying.
+// Response: reduce overlapping sector exposure in the higher-frequency strategy.
+```
+
+---
+
+## 5. Schema Changes
+
+### 5.1 New Columns on Existing Tables
+
+```sql
+-- stocks table: add strategy affinity
+ALTER TABLE stocks ADD COLUMN strategy_type TEXT CHECK (strategy_type IN ('momentum','value','macro_etf'));
+ALTER TABLE stocks ADD COLUMN strategy_priority INTEGER DEFAULT 0; -- higher = evaluate first
+
+-- trades table: track which strategy made the trade
+ALTER TABLE trades ADD COLUMN strategy_type TEXT CHECK (strategy_type IN ('momentum','value','macro_etf'));
+ALTER TABLE trades ADD COLUMN position_type TEXT DEFAULT 'long' CHECK (position_type IN ('long','short'));
+
+-- portfolio_positions: strategy ownership
+ALTER TABLE portfolio_positions ADD COLUMN strategy_type TEXT CHECK (strategy_type IN ('momentum','value','macro_etf'));
+ALTER TABLE portfolio_positions ADD COLUMN trailing_stop_price REAL;
+ALTER TABLE portfolio_positions ADD COLUMN stop_loss_price REAL;
+
+-- analysis_logs: strategy context
+ALTER TABLE analysis_logs ADD COLUMN strategy_type TEXT CHECK (strategy_type IN ('momentum','value','macro_etf'));
+ALTER TABLE analysis_logs ADD COLUMN signal_version INTEGER DEFAULT 1;
+
+-- signals: strategy context
+ALTER TABLE signals ADD COLUMN strategy_type TEXT CHECK (strategy_type IN ('momentum','value','macro_etf'));
+```
+
+### 5.2 New Tables
+
+```sql
+-- ─── Strategy State ────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS strategy_state (
+  strategy_type   TEXT PRIMARY KEY CHECK (strategy_type IN ('momentum','value','macro_etf')),
+  allocated_cash  REAL NOT NULL DEFAULT 0,
+  invested_value  REAL NOT NULL DEFAULT 0,
+  total_value     REAL NOT NULL DEFAULT 0,
+  target_pct      REAL NOT NULL,
+  current_pct     REAL NOT NULL DEFAULT 0,
+  positions_count INTEGER NOT NULL DEFAULT 0,
+  is_paused       INTEGER NOT NULL DEFAULT 0,
+  pause_reason    TEXT,
+  pause_until     TEXT,
+  last_run_at     TEXT,
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ─── Macro Indicators Cache ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS macro_indicators (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  indicator_name  TEXT NOT NULL,        -- e.g., 'CPI_YOY', 'UNRATE', 'FED_FUNDS'
+  value           REAL NOT NULL,
+  period          TEXT NOT NULL,        -- e.g., '2025-06', '2025-Q2'
+  source          TEXT NOT NULL,        -- 'fred', 'calculated'
+  fetched_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_macro_name ON macro_indicators(indicator_name);
+CREATE INDEX IF NOT EXISTS idx_macro_period ON macro_indicators(period);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_macro_unique ON macro_indicators(indicator_name, period);
+
+-- ─── Social Mentions ────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS social_mentions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol          TEXT NOT NULL,
+  platform        TEXT NOT NULL CHECK (platform IN ('reddit','stocktwits','twitter')),
+  mention_count   INTEGER NOT NULL DEFAULT 0,
+  sentiment_avg   REAL,                -- -1 to +1
+  sample_posts    TEXT,                -- JSON array of top posts
+  period_start    TEXT NOT NULL,
+  period_end      TEXT NOT NULL,
+  fetched_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_social_symbol ON social_mentions(symbol);
+
+-- ─── Insider Transactions ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS insider_transactions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol          TEXT NOT NULL,
+  insider_name    TEXT NOT NULL,
+  title           TEXT,                -- CEO, CFO, Director, etc.
+  transaction_type TEXT NOT NULL CHECK (transaction_type IN ('buy','sell','option_exercise')),
+  shares          REAL NOT NULL,
+  price_per_share REAL,
+  total_value     REAL,
+  filed_at        TEXT NOT NULL,
+  fetched_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_insider_symbol ON insider_transactions(symbol);
+CREATE INDEX IF NOT EXISTS idx_insider_date ON insider_transactions(filed_at);
+
+-- ─── Strategy Performance Tracking ──────────────────────────────
+CREATE TABLE IF NOT EXISTS strategy_performance (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_type   TEXT NOT NULL CHECK (strategy_type IN ('momentum','value','macro_etf')),
+  period_start    TEXT NOT NULL,
+  period_end      TEXT NOT NULL,
+  total_return    REAL NOT NULL,
+  sharpe_ratio    REAL,
+  max_drawdown    REAL,
+  win_rate        REAL,
+  trades_count    INTEGER NOT NULL DEFAULT 0,
+  avg_holding_days REAL,
+  calculated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_strat_perf ON strategy_performance(strategy_type, period_start);
+```
+
+---
+
+## 6. Scheduler Redesign
+
+### 6.1 Per-Strategy Cadences
+
+```typescript
+export interface StrategySchedule {
+  strategyId: StrategyType;
+  analysisCron: string;
+  description: string;
+  marketHoursOnly: boolean;
+}
+
+export const STRATEGY_SCHEDULES: StrategySchedule[] = [
+  // Momentum: every 5 minutes during market hours + reactive events
+  {
+    strategyId: 'momentum',
+    analysisCron: '*/5 9-16 * * 1-5',     // every 5 min, Mon-Fri 9AM-4PM
+    description: 'Momentum scanner (5-min intervals, market hours)',
+    marketHoursOnly: true,
+  },
+  // Value: every 4 hours (existing cadence, refined)
+  {
+    strategyId: 'value',
+    analysisCron: '0 */4 * * 1-5',         // every 4 hours, weekdays
+    description: 'Value analysis (4-hour intervals)',
+    marketHoursOnly: false,                 // can analyze after hours
+  },
+  // Macro ETF: daily analysis, monthly rebalance
+  {
+    strategyId: 'macro_etf',
+    analysisCron: '0 7 * * 1-5',           // daily at 7 AM (pre-market)
+    description: 'Macro ETF analysis (daily pre-market)',
+    marketHoursOnly: false,
+  },
+];
+
+// Additional scheduled jobs
+export const SYSTEM_SCHEDULES = {
+  // Reactive news monitor — every 10 minutes during market hours
+  reactiveNews: '*/10 9-16 * * 1-5',
+  // Macro data refresh — weekly on Sunday
+  macroDataRefresh: '0 8 * * 0',
+  // Social data collection — every 30 min during market hours
+  socialDataCollection: '*/30 8-18 * * 1-5',
+  // Insider filing check — daily at 6 PM (after market close)
+  insiderFilingCheck: '0 18 * * 1-5',
+  // Strategy correlation check — weekly on Friday after close
+  correlationCheck: '0 19 * * 5',
+  // Strategy performance snapshot — daily after market close
+  performanceSnapshot: '0 17 * * 1-5',
+  // Portfolio rebalance check — monthly on 1st, 7 AM
+  monthlyRebalance: '0 7 1 * *',
+  // Cache cleanup — daily at midnight
+  cacheCleanup: '0 0 * * *',
+};
+```
+
+### 6.2 Updated Scheduler Architecture
+
+```typescript
+// server/src/services/scheduler.ts — redesigned entry point
+
+export function startScheduler(): void {
+  // 1. Strategy-specific analysis loops
+  for (const schedule of STRATEGY_SCHEDULES) {
+    cron.schedule(schedule.analysisCron, () => runStrategyPipeline(schedule.strategyId));
+  }
+
+  // 2. System maintenance jobs
+  cron.schedule(SYSTEM_SCHEDULES.reactiveNews, () => monitorNewsAndReact());
+  cron.schedule(SYSTEM_SCHEDULES.macroDataRefresh, () => refreshMacroIndicators());
+  cron.schedule(SYSTEM_SCHEDULES.socialDataCollection, () => collectSocialData());
+  cron.schedule(SYSTEM_SCHEDULES.insiderFilingCheck, () => checkInsiderFilings());
+  cron.schedule(SYSTEM_SCHEDULES.correlationCheck, () => measureStrategyCorrelation());
+  cron.schedule(SYSTEM_SCHEDULES.performanceSnapshot, () => snapshotStrategyPerformance());
+  cron.schedule(SYSTEM_SCHEDULES.monthlyRebalance, () => runMonthlyRebalance());
+  cron.schedule(SYSTEM_SCHEDULES.cacheCleanup, () => purgeExpiredCache());
+
+  // 3. Existing jobs (unchanged)
+  cron.schedule(DEFAULT_SCHEDULER_CONFIG.snapshotCron, () => takePortfolioSnapshot());
+  cron.schedule(DEFAULT_SCHEDULER_CONFIG.learningCron, () => runLearningCycle());
+}
+
+async function runStrategyPipeline(strategyId: StrategyType): Promise<PipelineRunResult> {
+  // 1. Check if strategy is paused (circuit breaker, drawdown, etc.)
+  // 2. Get strategy's stock universe (filtered by strategy_type)
+  // 3. Collect market data for each stock
+  // 4. Run strategy-specific signal pipeline
+  // 5. Apply strategy-specific risk limits
+  // 6. Execute trades within strategy capital allocation
+  // 7. Record results
+}
+```
+
+---
+
+## 7. Implementation Plan
+
+### Phase 1: Foundation (Priority: Critical) — Week 1-2
+**Assigned to: Malcolm (data/signals)**
+
+1. **Create FRED API module** (`server/src/services/apis/fred.ts`)
+   - Fetch CPI, GDP, unemployment, Fed funds rate, yield curve spread, PMI
+   - Cache in `macro_indicators` table
+   - FRED API key required (free, instant registration)
+
+2. **Create Reddit API module** (`server/src/services/apis/reddit.ts`)
+   - OAuth2 app registration (free)
+   - Fetch mentions from r/wallstreetbets, r/stocks, r/investing
+   - Store in `social_mentions` table
+
+3. **Create SEC EDGAR module** (`server/src/services/apis/secEdgar.ts`)
+   - Fetch Form 4 filings for watched symbols
+   - Store in `insider_transactions` table
+
+4. **Create GDELT API module** (`server/src/services/apis/gdelt.ts`)
+   - Political event tracking
+   - Filter for financial-relevant geopolitical events
+
+**Assigned to: Muldoon (trading engine)**
+
+5. **Refactor trading engine for multi-strategy** (`server/src/services/tradingEngine.ts`)
+   - Add `StrategyType` parameter to `shouldBuy()`, `shouldSell()`, `executeTrade()`
+   - Strategy-specific thresholds (replace current stock/ETF binary split)
+   - Capital allocation enforcement per strategy
+   - Trailing stop implementation
+
+6. **Create strategy state manager** (`server/src/services/strategyManager.ts`)
+   - Track per-strategy capital, positions, performance
+   - Implement circuit breakers and pause logic
+   - Cross-strategy portfolio guards
+
+**Assigned to: Ellie (UI)**
+
+7. **Strategy selector UI** — Dashboard tabs or views per strategy
+8. **Strategy performance cards** — Show each strategy's P&L, win rate, Sharpe
+9. **Capital allocation visualization** — Pie/donut chart of strategy allocations
+
+### Phase 2: Signal Modules (Priority: High) — Week 2-3
+**Assigned to: Malcolm**
+
+10. Create `server/src/services/signals/strategies/momentum/` directory:
+    - `newsVelocitySignal.ts`
+    - `socialBuzzSignal.ts`
+    - `volumeSpikeSignal.ts`
+    - `priceMomentumSignal.ts`
+    - `searchAccelerationSignal.ts`
+    - `index.ts` (momentum pipeline config)
+
+11. Create `server/src/services/signals/strategies/value/` directory:
+    - `fundamentalValueSignal.ts`
+    - `contrarianSentimentSignal.ts`
+    - `meanReversionSignal.ts`
+    - `insiderActivitySignal.ts`
+    - `qualityScoreSignal.ts`
+    - `index.ts` (value pipeline config)
+
+12. Create `server/src/services/signals/strategies/macro/` directory:
+    - `macroRegimeSignal.ts`
+    - `yieldCurveSignal.ts`
+    - `sectorRotationSignal.ts`
+    - `politicalRiskSignal.ts`
+    - `etfRelativeValueSignal.ts`
+    - `index.ts` (macro pipeline config)
+
+### Phase 3: Integration (Priority: High) — Week 3-4
+**Assigned to: Muldoon**
+
+13. **Redesign scheduler** (`server/src/services/scheduler.ts`)
+    - Per-strategy cron schedules
+    - Strategy-aware pipeline runner
+    - System maintenance jobs
+
+14. **Schema migration** (`server/src/db/migrations/multi-strategy.ts`)
+    - All ALTER TABLE statements from Section 5
+    - New table creation
+    - Data migration: classify existing positions/trades as `value` strategy
+
+**Assigned to: Ellie**
+
+15. **Activity feed per strategy** — Filter activity log by strategy
+16. **Trade attribution** — Show which strategy triggered each trade
+17. **Risk dashboard** — Drawdown charts, correlation matrix
+
+### Phase 4: Polish & Learning (Priority: Medium) — Week 4-5
+
+18. **Strategy-aware learning engine** — Evaluate signal accuracy per strategy
+19. **Cross-strategy correlation monitoring**
+20. **Monthly rebalance automation**
+21. **Backtest framework** — Simulate strategies against historical data
+
+### File Creation/Modification Summary
+
+**New files (19):**
+```
+server/src/services/apis/fred.ts
+server/src/services/apis/reddit.ts
+server/src/services/apis/secEdgar.ts
+server/src/services/apis/gdelt.ts
+server/src/services/apis/stocktwits.ts
+server/src/services/apis/newsapi.ts
+server/src/services/apis/alphaVantage.ts
+server/src/services/signals/strategies/momentum/index.ts
+server/src/services/signals/strategies/momentum/newsVelocitySignal.ts
+server/src/services/signals/strategies/momentum/socialBuzzSignal.ts
+server/src/services/signals/strategies/momentum/volumeSpikeSignal.ts
+server/src/services/signals/strategies/momentum/priceMomentumSignal.ts
+server/src/services/signals/strategies/value/index.ts
+server/src/services/signals/strategies/value/fundamentalValueSignal.ts
+server/src/services/signals/strategies/value/contrarianSentimentSignal.ts
+server/src/services/signals/strategies/value/meanReversionSignal.ts
+server/src/services/signals/strategies/value/insiderActivitySignal.ts
+server/src/services/signals/strategies/macro/index.ts
+server/src/services/signals/strategies/macro/macroRegimeSignal.ts
+server/src/services/signals/strategies/macro/yieldCurveSignal.ts
+server/src/services/signals/strategies/macro/sectorRotationSignal.ts
+server/src/services/strategyManager.ts
+server/src/db/migrations/multi-strategy.ts
+```
+
+**Modified files (8):**
+```
+server/src/types.ts                    — Add StrategyType, strategy configs
+server/src/services/tradingEngine.ts   — Strategy-aware trading
+server/src/services/scheduler.ts       — Multi-cadence scheduling
+server/src/services/signals/index.ts   — Route to strategy-specific pipelines
+server/src/db/schema.ts                — Add new tables + columns
+shared/src/types.ts                    — Add StrategyType to shared types
+client/src/App.tsx                     — Strategy navigation
+client/src/api/client.ts              — Strategy-filtered API calls
+```
+
+---
+
+## 8. Type Definitions (shared)
+
+Add to `shared/src/types.ts`:
+
+```typescript
+export type StrategyType = 'momentum' | 'value' | 'macro_etf';
+
+export type SignalSource =
+  // Existing
+  | 'pe_ratio' | 'price_trend' | 'macro_trend'
+  | 'google_trends' | 'social_sentiment' | 'news_sentiment'
+  // Momentum signals
+  | 'news_velocity' | 'social_buzz' | 'volume_spike'
+  | 'price_momentum' | 'search_acceleration'
+  // Value signals
+  | 'fundamental_value' | 'contrarian_sentiment' | 'mean_reversion'
+  | 'insider_activity' | 'quality_score'
+  // Macro ETF signals
+  | 'macro_regime' | 'yield_curve' | 'sector_rotation'
+  | 'political_risk' | 'etf_relative_value';
+
+export interface StrategyPerformance {
+  strategyType: StrategyType;
+  totalReturn: number;
+  sharpeRatio: number | null;
+  maxDrawdown: number;
+  winRate: number;
+  tradesCount: number;
+  avgHoldingDays: number;
+  periodStart: string;
+  periodEnd: string;
+}
+```
+
+---
+
+## 9. Migration Path
+
+The existing single-pipeline system continues to work during migration. The migration is additive:
+
+1. **Day 1:** Run schema migration (new tables + columns). All existing trades/positions get `strategy_type = 'value'` as default.
+2. **Week 1:** FRED + Reddit APIs operational. Macro data flowing.
+3. **Week 2:** Strategy-specific signal modules complete. Can be tested independently via `/api/debug/strategy/:type/analyze/:symbol`.
+4. **Week 3:** Trading engine refactored. Strategy manager live. Old single-pipeline scheduler replaced with multi-cadence scheduler.
+5. **Week 4:** UI updated. All three strategies running in production. Learning engine evaluating per-strategy.
+
+**Backward compatibility:** The old `analyzeStock()` and `analyzeETF()` functions remain as wrappers that route to the appropriate strategy pipeline based on asset type and context. Existing API endpoints continue to work; new `/api/strategies` endpoints are added alongside.
+
+---
+
+## 10. Success Metrics
+
+After 30 days of operation, evaluate:
+
+| Metric | Target |
+|---|---|
+| Momentum strategy trades per week | 10-30 |
+| Value strategy trades per month | 5-15 |
+| Macro ETF rebalances per month | 1-3 |
+| Cross-strategy correlation | < 0.5 |
+| Portfolio Sharpe ratio (combined) | > 0.5 |
+| Max drawdown (any strategy) | < 15% |
+| Signal data availability | > 90% of signals produce non-fallback data |
+| API rate limit violations | < 1% of requests |
+
+---
+
+*This architecture transforms APEX from a single evaluation engine into a proper multi-strategy autonomous trading system. Each strategy has a clear purpose, independent capital, distinct signals, and appropriate time horizons. The risk management layer prevents any single strategy from dominating or endangering the portfolio.*
+
+
+---
+
+### Signal Engine Audit & Upgrade (2026-04-22)
+
+**Author:** Malcolm (Data Engineer)
+**Status:** Implemented
+**Date:** 2026-04-22
+
+# Signal Engine Audit & Upgrade Report
+
+**Author:** Malcolm (Data Engineer)  
+**Date:** 2025-07-18  
+**Status:** Implemented — awaiting production validation
+
+---
+
+## Executive Summary
+
+Audited all 13 signal/service files in the APEX signal engine. Found three critical gaps: (1) ETF macro signal (35% weight) relied on keyword-matching Finnhub news headlines instead of real economic data, (2) "social sentiment" was a news-volume proxy with no actual social data, and (3) news sentiment lacked velocity/urgency detection. Implemented fixes for all three by adding FRED economic data integration, Reddit buzz tracking, and news velocity/urgency scoring.
+
+---
+
+## Phase 1: Audit Findings
+
+### What Works Well
+- **Valuation signal** — Real Yahoo Finance fundamentals (P/E, P/B, div yield, 52-week range). Market-cap-tier adjustments. Solid.
+- **Trend signal** — SMA crossover logic with volume confirmation. Handles partial data (50-199 days). Sound methodology.
+- **Signal aggregation** — Dynamic weight redistribution when a signal reports confidence < 0.05. Prevents low-quality signals from diluting the composite.
+- **Graceful degradation** — All signals return neutral (score=50, confidence=0.1) on failure. Never throw.
+- **ETF vs stock dispatch** — Separate pipelines with appropriate weight profiles.
+- **LLM conviction boost** — Qualitative overlay that rewards strong signal+reasoning alignment.
+
+### Critical Gaps (Now Fixed)
+
+#### 1. Macro Signal: Keyword Matching → FRED Economic Data (HIGHEST IMPACT)
+- **Before:** `analyzeMacroTrend()` in `etfSignals.ts` scanned Finnhub news headlines for words like "inflation", "rate hike", "recession". This carried 35% weight in the ETF pipeline — the single largest signal was based on keyword counting.
+- **After:** New `analyzeMacroRegime()` pulls 7 FRED series (CPI, unemployment, GDP growth, PMI, fed funds rate, yield curve spread, initial jobless claims). Classifies macro regime as growth/slowdown/recession/recovery/stagflation. Applies sector-specific adjustments (e.g., utilities outperform in recession, tech in growth).
+- **Files:** `server/src/services/data/fredClient.ts`, `server/src/services/signals/macroRegimeSignal.ts`
+
+#### 2. Social Sentiment: News Proxy → Reddit Integration
+- **Before:** `deriveSocialProxy()` estimated social buzz from news article count and intensity. No real social data.
+- **After:** `getSocialBuzz()` queries Reddit (r/wallstreetbets, r/stocks, r/investing) for real mention counts, engagement-weighted sentiment, and buzz velocity. Falls back to news proxy if Reddit unavailable.
+- **Files:** `server/src/services/data/redditClient.ts`, `server/src/services/signals/sentimentSignal.ts`
+
+#### 3. News Sentiment: Static → Velocity/Urgency-Aware
+- **Before:** Simple recency-weighted average of keyword-matched sentiment. All sources treated equally. No concept of "breaking news" vs stale coverage.
+- **After:** Added news velocity detection (articles-per-hour acceleration), urgency keyword scanning (FDA approval, SEC investigation, bankruptcy, etc.), and source quality weighting (Reuters/Bloomberg 1.4x, CNBC 1.3x, blog 0.6x). New composite: news 60%, social 25%, velocity/urgency 15%.
+- **Files:** `server/src/services/signals/sentimentSignal.ts`
+
+### Known Limitations (Not Fixed)
+
+| Issue | Impact | Why Deferred |
+|-------|--------|--------------|
+| Finnhub sentiment uses keyword matching, not NLP | Moderate — misses sarcasm, context | Would need a paid NLP API; keyword matching is adequate for headline analysis |
+| Google Trends CAPTCHA failures | Low — dynamic weight redistribution already excludes it when confidence < 0.05 | Google's anti-bot detection; no reliable fix without proxy rotation |
+| Learning engine has no evaluated trades yet | Low for now — will matter at scale | System too new; needs 5+ trades with outcomes to start calibrating |
+| No earnings calendar signal | Moderate — could improve pre-earnings positioning | Needs Finnhub premium or alternative data source |
+
+---
+
+## Phase 2: New Data Sources
+
+### FRED API Client (`fredClient.ts`)
+- **Series tracked:** CPIAUCSL (CPI), UNRATE (unemployment), A191RL1Q225SBEA (GDP growth), ISM_PMI (PMI), FEDFUNDS (fed funds rate), T10Y2Y (yield curve spread), ICSA (initial claims)
+- **Cache:** SQLite, 6-hour TTL (economic data updates slowly)
+- **Regime classification:** Maps indicators to 5 regimes: growth, slowdown, recession, recovery, stagflation
+- **API key:** Requires `FRED_API_KEY` env var (free at fred.stlouisfed.org)
+- **Fallback:** Returns `unknown` regime with confidence 0.15 if API unavailable
+
+### Reddit Buzz Client (`redditClient.ts`)
+- **Subreddits:** r/wallstreetbets, r/stocks, r/investing
+- **Metrics:** Mention count, engagement-weighted sentiment (upvotes × 1 + comments × 3), buzz velocity (24h vs prior 24h), buzz level classification
+- **Cache:** SQLite, 30-minute TTL (social data moves fast)
+- **No API key needed** — uses public `.json` endpoints
+- **Fallback:** Returns null if Reddit unavailable; sentiment signal falls back to news proxy
+
+---
+
+## Phase 3: Signal Weight Architecture
+
+### Stock Pipeline (unchanged)
+| Signal | Weight | Source |
+|--------|--------|--------|
+| Valuation | 35% | Yahoo Finance fundamentals |
+| Trend | 25% | Price/volume history |
+| Sentiment | 20% | Finnhub news + Reddit buzz (upgraded) |
+| Search Interest | 20% | Google Trends |
+
+### ETF Pipeline (macro signal upgraded)
+| Signal | Weight | Source |
+|--------|--------|--------|
+| Macro Trend | 35% | **FRED economic data (upgraded from keyword matching)** |
+| Sector Momentum | 25% | Price trend analysis |
+| Market Sentiment | 20% | Finnhub news + Reddit buzz (upgraded) |
+| Search Interest | 10% | Google Trends |
+| Valuation | 10% | Yahoo Finance fundamentals |
+
+---
+
+## Recommendations for Other Agents
+
+### Muldoon (Trading Engine)
+- No trading engine changes needed — signal interface (`SignalResult`) unchanged.
+- Consider adding a **regime-aware position sizing modifier**: reduce max position size during `recession` or `stagflation` regimes, increase during `growth`.
+- The macro regime data is available via `classifyMacroRegime()` if the trading engine wants to consume it directly.
+
+### Ellie (Frontend)
+- New signal sources should be visible in the analysis detail view. The `SignalResultDTO` structure is unchanged, but the `source` field will now include richer metadata.
+- Consider adding a **macro regime indicator** to the dashboard (growth/slowdown/recession/recovery/stagflation with color coding).
+- Reddit buzz data could power a "Social Sentiment" card showing mention velocity and subreddit breakdown.
+
+### Wu (Testing)
+- Existing 19 signal tests should still pass (interfaces unchanged).
+- New test coverage needed for: FRED client caching/fallback, Reddit client parsing, macro regime classification logic, sentiment velocity scoring.
+- Mock FRED/Reddit API responses for deterministic tests.
+
+---
+
+## Verification
+
+- **TypeScript build:** `npx tsc --noEmit` passes with zero errors.
+- **Interface compatibility:** All new signals return standard `SignalResult` (score 0-100, confidence 0-1, direction bullish/bearish/neutral). No type changes needed.
+- **Backward compatibility:** Existing stock pipeline unmodified. ETF pipeline swapped one analyzer function with identical interface.
+- **Graceful degradation:** FRED unavailable → neutral macro signal (confidence 0.15). Reddit unavailable → falls back to news proxy. No crashes.
+
+---
+
+## Environment Setup
+
+Add to `.env`:
+```
+FRED_API_KEY=your_fred_api_key_here
+```
+Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
+
+No other environment changes needed. Reddit uses public endpoints (no key).
+

@@ -156,3 +156,28 @@ The server had `/api/analysis/performance` and `/api/analysis/decisions` but no 
 
 **TypeScript:** `npx tsc --noEmit` passes cleanly.
 
+### 2025-07-18 — Signal Engine Audit & Upgrade
+
+**Context:** Full audit of all 13 signal/service files. Identified and fixed 3 critical gaps.
+
+**New files created:**
+- `server/src/services/data/fredClient.ts` — FRED API client fetching 7 economic series (CPI, unemployment, GDP, PMI, fed funds rate, yield curve, initial claims). Classifies macro regime (growth/slowdown/recession/recovery/stagflation). SQLite cache with 6hr TTL. Requires `FRED_API_KEY` env var (free).
+- `server/src/services/data/redditClient.ts` — Reddit public JSON API client. Searches r/wallstreetbets, r/stocks, r/investing. Computes mention counts, engagement-weighted sentiment, buzz velocity. 30min cache. No API key needed.
+- `server/src/services/signals/macroRegimeSignal.ts` — FRED-based macro regime signal replacing keyword-matching `analyzeMacroTrend()`. Sector-specific adjustments (utilities in recession, tech in growth). Returns standard `SignalResult`.
+
+**Files modified:**
+- `server/src/services/signals/sentimentSignal.ts` — Added news velocity detection (articles-per-hour acceleration), urgency keyword scanning (FDA, SEC, bankruptcy, etc.), source quality weighting (Reuters/Bloomberg 1.4x, blog 0.6x), Reddit integration via `getSocialBuzz()`. New composite: news 60%, social 25%, velocity/urgency 15%.
+- `server/src/services/signals/etfSignals.ts` — Swapped `analyzeMacroTrend` (keyword matching) for `analyzeMacroRegime` (FRED economic data) in ETF_SIGNAL_PIPELINE. Same 35% weight, dramatically better signal quality.
+- `server/src/services/signals/index.ts` — Added import/export for `analyzeMacroRegime`.
+
+**Key learnings:**
+- The ETF macro signal was the single biggest weakness — 35% weight on keyword counting. Real economic data from FRED is free and far more informative.
+- Reddit public JSON endpoints (`reddit.com/r/{sub}/search.json`) work without API keys but are rate-limited. 30-min cache is essential.
+- News velocity (acceleration of article count) is a stronger breaking-news signal than raw article count. A ticker going from 2 to 8 articles/hour matters more than one that always has 10/hour.
+- Source quality weighting prevents blog spam from overwhelming wire service reporting.
+- All new data clients follow the existing caching pattern (SQLite `market_data_cache` table with TTL expiration). Consistency matters.
+
+**Audit report:** `.squad/decisions/inbox/malcolm-signal-engine-audit.md`
+
+**TypeScript:** `npx tsc --noEmit` passes cleanly. All interfaces unchanged — backward compatible.
+
